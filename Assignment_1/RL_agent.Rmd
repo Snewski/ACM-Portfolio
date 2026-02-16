@@ -1,0 +1,369 @@
+---
+title: "Assignment 1"
+author: "Sara Szabo"
+date: "2026-02-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# install.packages(c( "pacman", "remotes", "tidyverse", "data.table", "dtplyr", "downlit", "xml2", "rmarkdown", "sessioninfo", "brms" ))
+```
+
+# Based on notebook
+
+```{r}
+# Load necessary packages
+# patchwork helps combine multiple plots
+pacman::p_load(tidyverse, patchwork)
+
+# Number of trials per simulation
+trials <- 120  
+
+# Number of agents to simulate
+agents <- 100  
+
+# Optional: Set random seed for reproducibility
+set.seed(123)
+```
+
+```{r}
+# --- Simulation Parameters ---
+trials <- 120 # Number of trials for a single simulation run
+
+# --- Basic Implementation ---
+# Simulate an unbiased random agent (rate = 0.5)
+rate_unbiased <- 0.5
+choices_unbiased <- rbinom(trials, size = 1, prob = rate_unbiased)
+# rbinom generates random draws from a binomial distribution.
+# size = 1 makes it a Bernoulli trial (0 or 1 outcome).
+# prob = rate specifies the probability of getting a 1.
+
+# Simulate a biased random agent (rate = 0.8, chooses 'right' 80% of the time)
+rate_biased <- 0.8
+choices_biased <- rbinom(trials, size = 1, prob = rate_biased)
+
+# --- Visualization 1: Raw Choices ---
+# Create data frames for plotting
+d_unbiased <- tibble(trial = 1:trials, choice = choices_unbiased, rate = rate_unbiased)
+d_biased <- tibble(trial = 1:trials, choice = choices_biased, rate = rate_biased)
+
+# Plot raw choice sequence (0s and 1s)
+p1 <- ggplot(d_unbiased, aes(x = trial, y = choice)) +
+  geom_line(color = "blue") + geom_point(color = "blue", size = 1) +
+  labs(title = "Unbiased Random Agent (Rate = 0.5)", y = "Choice (0/1)") + theme_classic() + ylim(-0.1, 1.1)
+
+p2 <- ggplot(d_biased, aes(x = trial, y = choice)) +
+  geom_line(color = "red") + geom_point(color = "red", size = 1) +
+  labs(title = "Biased Random Agent (Rate = 0.8)", y = "Choice (0/1)") + theme_classic() + ylim(-0.1, 1.1)
+
+# Show plots side-by-side
+print(p1 + p2 + plot_layout(guides = "collect"))
+```
+
+# Assignment description
+
+[insert assignment description here]
+
+# Based on slides
+
+```{r}
+# this is my agent
+
+RandomAgent_f <- function(rate){
+  choice <- rbinom(1, 1, rate) # specifying mechanism + decision making
+  return(choice) # output
+}
+```
+
+```{r}
+?rbinom()
+```
+
+
+```{r}
+rate <- 0.5 # rate (theta) - choocing 1 this % of times
+randomChoice <- RandomAgent_f(rate)
+randomChoice
+```
+
+
+```{r}
+trials <- 120 # how many trials?
+
+randomChoice <- rep(NA, trials) # creating empty vector
+for (t in seq(trials)){
+  randomChoice[t] <- RandomAgent_f(rate) # running fucntion as many times as the trials & saving output
+}
+
+d1 <- tibble(trial = seq(trials), choice = randomChoice) # making a df
+p1 <- ggplot(d1, aes(trial, choice)) + 
+  geom_line() +
+  theme_classic() # plot
+
+p1 # display the plot
+```
+
+```{r}
+d1 <- NULL # making sure the df is not there already
+
+for (rate in seq(0, 1, 0.1)){# looping through rates of 0, 0.1, 0.2..., up to 1
+  randomChoice <- rep(NA, trials)
+  for (t in seq(trials)){randomChoice[t] <- RandomAgent_f(rate)}
+  temp <- tibble(trial = seq(trials), choice = randomChoice, rate)
+  if(exists("d1")){d1 <- rbind(d1, temp)} 
+  else{d1 <- temp}
+}
+
+p1 <- ggplot(d1, aes(trial, choice)) + geom_line()+facet_wrap(.~rate)+
+  theme_classic()
+p1
+```
+
+```{r}
+d1 <- d1 %>% 
+  group_by(rate) %>% 
+  mutate(
+    cumulative_rate = cumsum(choice)/seq_along(choice)
+  )
+
+p3 <- ggplot(d1, aes(trial, cumulative_rate))+
+  geom_line()+
+  geom_hline(yintercept = 0.5, linetype = "dashed")+
+  ylim(0,1)+
+  facet_wrap(.~rate)+
+  theme_classic()
+
+p3
+
+```
+
+```{r}
+ggplot(d1, aes(trial, cumulative_rate,
+               color = rate, group = rate))+
+  geom_line()+
+  geom_hline(yintercept = 0.5,
+             linetype = "dashed")+
+  ylim(0,1)+
+  theme_classic()
+```
+Refactoring agent function to incorporate errors
+```{r}
+RandomAgentNoise_f <- function(rate, noise){
+  choice <- rbinom(1, 1, rate)
+  if (rbinom(1, 1, noise)==1){choice = rbinom(1, 1, 0.5)}
+  return(choice)
+}
+```
+
+Implementing noise
+```{r}
+d2 <- NULL
+
+for (noise in seq(0, 0.5, 0.1)){
+  for (rate in seq(0, 1, 0.1)){
+    randomChoice <- rep(NA, trials)
+    for (t in seq(trials)){randomChoice[t] <- RandomAgentNoise_f(rate, noise)}
+    temp <- tibble(trial = seq(trials), choice = randomChoice, rate, noise)
+    if (exists("d2")){d2 <- rbind(d2, temp)} 
+    else{d2 <- temp}
+  }
+}
+
+d2 <- d2 %>% 
+  group_by(rate, noise) %>% 
+  mutate(cumulative_rate = cumsum(choice)/seq_along(choice)
+         )
+
+p4 <- ggplot(d2, aes(trial, cumulative_rate, group = rate, color = rate))+
+  geom_line()+
+  geom_hline(yintercept = 0.5, linetype = "dashed")+
+  ylim(0,1)+
+  facet_wrap(.~noise)+
+  theme_classic()
+
+p4
+
+```
+
+# Win-stay-lose-shift Agent
+
+```{r}
+WSLSAgent_f <- function(prevChoice, feedback){
+  if (feedback == 1){
+    choice = prevChoice}
+  else if (feedback == 0){
+    choice = 1-prevChoice}
+  return(choice)
+}
+```
+
+```{r}
+WSLSChoice <- WSLSAgent_f(1, 0)
+```
+
+```{r}
+# against random agent
+rate <- 0.7
+
+Self <- rep(NA, trials)
+Other <- rep(NA, trials)
+
+Self[1] <- RandomAgent_f(0.5)
+for (t in seq(trials)){Other[t] <- RandomAgent_f(rate)}
+
+for (i in 2:trials){
+  if (Self[i-1]== Other[i-1]){ # Self = Matcher
+    feedback = 1
+  }
+  else {feedback == 0}
+  Self[i] <- WSLSAgent_f(Self[i-1], feedback)
+}
+```
+
+
+```{r}
+# visualizing it
+df <- tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other))
+
+ggplot(df)+theme_classic()+geom_line(color = "red", aes(trial, Self)) +
+  geom_line(color = "blue", aes(trial, Other))
+```
+
+```{r}
+df <- df %>% mutate(
+  cumulative_rateSelf = cumsum(feedback) / seq_along(feedback),
+  cumulative_rateOther = cumsum(1-feedback) / seq_along(feedback)
+)
+
+ggplot(df) + theme_classic() + geom_line(color = "red", aes(trial, cumulative_rateSelf)) + geom_line(color = "blue", aes(trial, cumulative_rateOther))
+```
+
+## Note: get back to slide 36 (wsls vs wsls)
+
+Idea: RL (switching based on wins/losses) vs WSLS
+biased agent is also an option
+
+Question: is it probabilistic, stochastic, deterministic?
+
+Our agent will fight against WSLS and random agent
+
+Idea: change strategy midway -> e deterministic until 50% of trials, then what?
+
+
+# Implementing reinforcement learning
+
+$$  V_t = V_{t-1} + \alpha \cdot (Feedback_t - V_{t-1}) = V_{t-1} + \alpha \cdot PE$$
+
+Current value = weighted sum of all past rewards where weight decays exponentially
+
+$$Weight_k = \alpha(1-\alpha)^k  $$ 
+
+```{r}
+# for example
+
+WSLSAgent_f <- function(prevChoice, feedback){
+  if (feedback == 1){
+    choice = prevChoice}
+  else if (feedback == 0){
+    choice = 1-prevChoice}
+  return(choice)
+}
+
+WSLSChoice <- WSLSAgent_f(1, 0)
+
+
+WSLSAgent_f <- function(prevChoice, feedback, noise = 0) {
+  # Input validation
+  if (!prevChoice %in% c(0, 1)) stop("Previous choice must be 0 or 1.")
+  if (!feedback %in% c(0, 1)) stop("Feedback must be 0 or 1.")
+  if (!is.numeric(noise) || noise < 0 || noise > 1) stop("Noise must be a probability between 0 and 1.")
+
+  # Core WSLS logic:
+  # If feedback is 1 (win), stay: choice = prevChoice
+  # If feedback is 0 (loss), shift: choice = 1 - prevChoice
+  choice <- ifelse(feedback == 1, prevChoice, 1 - prevChoice)
+
+  # Apply noise if specified
+  if (noise > 0 && runif(1) < noise) {
+    # Override with a random 50/50 choice
+    choice <- sample(c(0, 1), 1)
+  }
+
+  return(choice)
+}
+```
+
+
+
+```{r}
+# previous choice = previous expected value
+# reward = feedback
+
+RL_agent_f <- function(PrevExValue, alpha, reward){
+  PE = reward - PrevExValue
+  expected_value = PrevExValue + alpha * PE
+  choice <- ifelse(expected_value >= 0.5, 1, 0) # this is probably wrong, I need to understand how it works
+  return(choice) # has to be binary - the one piece I don't have yet
+}
+```
+
+```{r}
+RL_agent_f(1, 0.8, 0)
+```
+
+
+```{r}
+# A series of different alphas
+d5 <- NULL # making sure the df is not there already
+
+for (alpha in seq(0, 1, 0.1)){# looping through rates of 0, 0.1, 0.2..., up to 1
+  informedChoice <- rep(NA, trials)
+  for (t in seq(trials)){informedChoice[t] <- RL_agent_f(alpha)}
+  temp <- tibble(trial = seq(trials), choice = infomredChoice, alpha)
+  if(exists("d5")){d5 <- rbind(d5, temp)} 
+  else{d1 <- temp}
+}
+
+p1 <- ggplot(d5, aes(trial, choice)) + geom_line()+facet_wrap(.~alpha)+
+  theme_classic()
+p1
+
+```
+
+# Simulating choices of this thing
+
+```{r}
+trials <- 120 # how many trials?
+
+prevExValue <- rbinom(trials, size = 1, 0.5)
+alpha <- 0.8
+reward <- rbinom(trials, size = 1, 0.5)
+
+informedChoice <- rep(NA, trials) # creating empty vector
+for (t in seq(trials)){
+  informedChoice[t] <- RL_agent_f(prevExValue, alpha, reward) # running fucntion as many times as the trials & saving output
+}
+
+d8 <- tibble(trial = seq(trials), choice = informedChoice) # making a df
+p8 <- ggplot(d8, aes(trial, choice)) + 
+  geom_line() +
+  theme_classic() # plot
+
+p8 # display the plot
+```
+
+
+
+# RL against WSLS
+
+```{r}
+
+```
+
+Note: does the model act according to the assumptions I put into it? Compare performance against existing implementation
+
+# add exponential decay of memory
