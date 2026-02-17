@@ -1,0 +1,330 @@
+---
+title: "Assignment 1"
+author: "Peter Houe Wisnewski"
+date: "2026-02-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(tidyverse)
+
+
+```
+
+
+```{r}
+
+## Global Parameters ##
+trials <- 120
+agents <- 100
+noise <- 0.05
+prob_head <- 0.85
+
+```
+
+
+```{r}
+
+## Random/Biased Agent ##
+
+# biased_agent <- function(prob_head) {
+#   
+#   choice <- rbinom(1, 1, prob_head)
+#   
+#   return(choice)
+# }
+
+
+biased_agent_noise <- function(prob_head, noise) {
+  
+  choice <- rbinom(1, 1, prob_head)
+  
+  if(rbinom(1, 1, noise)==1){choice =rbinom(1,1,0.5)}
+  
+  return(choice)
+}
+
+```
+
+
+```{r}
+## WSLS Agent ##
+
+# WSLS_agent <- function(prev_choice, feedback){
+#   if(feedback==1){
+#     choice = prev_choice
+#   } else if(feedback==0){
+#     choice = 1-prev_choice}
+#   return(choice)
+# }
+
+WSLS_agent_noise <- function(prev_choice, feedback, noise) {
+  
+  # Standard WSLS rule
+  if (feedback == 1) {
+    choice <- prev_choice
+  } else if (feedback == 0) {
+    choice <- 1 - prev_choice
+  }
+  
+  # Add noise: with probability = noise, randomize choice
+  if (rbinom(1, 1, noise) == 1) {choice <- rbinom(1, 1, 0.5)}
+  
+  return(choice)
+}
+
+
+```
+
+
+```{r}
+beta_agent <- function(prev_alpha, prev_beta, other_prev) {
+  
+  # Update Beta parameters
+  alpha <- prev_alpha + other_prev
+  beta  <- prev_beta  + (1 - other_prev)
+  
+  # Expected value of posterior
+  rate <- alpha / (alpha + beta)
+  
+  # Choice based on expected value
+  choice <- rbinom(1, 1, rate)
+  
+  return(list(choice = choice, alpha = alpha, beta = beta))
+}
+```
+
+
+```{r}
+
+simulate_Beta_vs_WSLS <- function(trials, noise) {
+  
+  # storage
+  WSLS_choice <- rep(NA, trials)
+  Beta_choice <- rep(NA, trials)
+  alpha <- beta <- rep(NA, trials)
+  
+  # initial states
+  WSLS_choice[1] <- rbinom(1, 1, 0.5)
+  Beta_choice[1] <- rbinom(1, 1, 0.5)
+  alpha[1] <- 1
+  beta[1]  <- 1
+  
+  for (t in 2:trials) {
+    
+    # --- WSLS agent ---
+    if(Beta_choice[t-1]==WSLS_choice[t-1]){feedback=1}else{feedback=0}
+    WSLS_choice[t] <- WSLS_agent_noise(WSLS_choice[t-1], 1-feedback, noise) # WSLS is not matching
+    
+    # --- Beta agent ---
+    res <- beta_agent(alpha[t-1], beta[t-1], WSLS_choice[t-1])
+    Beta_choice[t] <- res$choice
+    alpha[t] <- res$alpha
+    beta[t]  <- res$beta
+  }
+  
+  return(list(WSLS = WSLS_choice,
+              Beta = Beta_choice,
+              alpha = alpha,
+              beta = beta))
+}
+
+
+simulate_Beta_vs_WSLS_agents <- function(agents, trials, noise) {
+  
+  results <- vector("list", agents)
+  
+  for (i in 1:agents) {
+    results[[i]] <- simulate_Beta_vs_WSLS(trials, noise)
+  }
+  
+  return(results)
+}
+
+
+```
+
+```{r}
+simulate_Beta_vs_Biased <- function(trials, prob_head, noise) {
+  
+  # storage
+  Beta_choice   <- rep(NA, trials)
+  Biased_choice <- rep(NA, trials)
+  alpha <- beta <- rep(NA, trials)
+  
+  # initial states
+  Beta_choice[1]   <- rbinom(1, 1, 0.5)
+  Biased_choice[1] <- rbinom(1, 1, 0.5)
+  alpha[1] <- 1
+  beta[1]  <- 1
+  
+  for (t in 2:trials) {
+    
+    # --- Biased agent ---
+    Biased_choice[t] <- biased_agent_noise(prob_head, noise)
+    
+    # --- Beta agent ---
+    res <- beta_agent(alpha[t-1], beta[t-1], Biased_choice[t-1])
+    Beta_choice[t] <- res$choice
+    alpha[t] <- res$alpha
+    beta[t]  <- res$beta
+  }
+  
+  return(list(
+    Beta   = Beta_choice,
+    Biased = Biased_choice,
+    alpha  = alpha,
+    beta   = beta
+  ))
+}
+
+simulate_Beta_vs_Biased_agents <- function(agents, trials, prob_head, noise) {
+  
+  results <- vector("list", agents)
+  
+  for (i in 1:agents) {
+    results[[i]] <- simulate_Beta_vs_Biased(
+      trials = trials,
+      prob_head = prob_head,
+      noise = noise
+    )
+  }
+  
+  return(results)
+}
+
+```
+
+
+
+
+```{r}
+## Simulating 100 agents ##
+set.seed(123)  # reproducibility
+Beta_vs_WSLS <- simulate_Beta_vs_WSLS_agents(agents, trials, noise)
+Beta_vs_Biased <- simulate_Beta_vs_Biased_agents(agents, trials, prob_head, noise)
+```
+
+
+
+
+```{r}
+
+# Convert Beta vs WSLS results into a data frame #
+df <- do.call(rbind, lapply(1:100, function(i) {
+  data.frame(
+    agent = i,
+    trial = 1:length(Beta_vs_WSLS[[i]]$WSLS),
+    WSLS = Beta_vs_WSLS[[i]]$WSLS,
+    Beta = Beta_vs_WSLS[[i]]$Beta
+  )
+}))
+
+df$feedback <- ifelse(df$WSLS == df$Beta, 1, 0)
+
+df <- df %>%
+  group_by(agent) %>%
+  mutate(
+    cumulative_rateSelf  = cumsum(feedback) / seq_along(feedback),
+    cumulative_rateOther = cumsum(1 - feedback) / seq_along(feedback)
+  ) %>%
+  ungroup()
+
+df_avg <- df %>%
+  group_by(trial) %>%
+  summarise(mean_self = mean(cumulative_rateSelf))
+
+
+# Convert Beta vs Biased results into a data frame #
+df2 <- do.call(rbind, lapply(1:100, function(i) {
+  data.frame(
+    agent = i,
+    trial = 1:length(Beta_vs_Biased[[i]]$Biased),
+    Biased = Beta_vs_Biased[[i]]$Biased,
+    Beta = Beta_vs_Biased[[i]]$Beta
+  )
+}))
+
+df2$feedback <- ifelse(df2$Biased == df2$Beta, 1, 0)
+
+df2 <- df2 %>%
+  group_by(agent) %>%
+  mutate(
+    cumulative_rateSelf  = cumsum(feedback) / seq_along(feedback),
+    cumulative_rateOther = cumsum(1 - feedback) / seq_along(feedback)
+  ) %>%
+  ungroup()
+
+df_avg2 <- df2 %>%
+  group_by(trial) %>%
+  summarise(mean_self = mean(cumulative_rateSelf))
+
+
+
+
+
+```
+
+
+```{r}
+
+# Heatmaps for Beta choices #
+ggplot(df, aes(x = trial, y = agent, fill = Beta)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "black") +
+  labs(title = "Beta Agent Choices Across 100 Matchups",
+       x = "Trial", y = "Agent")
+
+
+ggplot(df2, aes(x = trial, y = agent, fill = Beta)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "black") +
+  labs(title = "Beta Agent Choices Across 100 Matchups",
+       x = "Trial", y = "Agent")
+
+```
+
+
+```{r}
+
+
+ggplot(df, aes(x = trial, y = cumulative_rateSelf, group = agent)) +
+  geom_line(alpha = 0.15, color = "steelblue") +
+  geom_line(
+    data = df_avg,
+    aes(x = trial, y = mean_self, group = 1),
+    color = "red",
+    size = 1.2
+  ) +
+  labs(
+    title = "Cumulative Match Rate Across 100 Matchups",
+    x = "Trial",
+    y = "Cumulative Agreement"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(df2, aes(x = trial, y = cumulative_rateSelf, group = agent)) +
+  geom_line(alpha = 0.15, color = "steelblue") +
+  geom_line(
+    data = df_avg2,
+    aes(x = trial, y = mean_self, group = 1),
+    color = "red",
+    size = 1.2
+  ) +
+  labs(
+    title = "Cumulative Match Rate Across 100 Matchups",
+    x = "Trial",
+    y = "Cumulative Agreement"
+  ) +
+  theme_minimal()
+```
+
+
+
