@@ -23,7 +23,7 @@ library(tidyverse)
 trials <- 120
 agents <- 100
 noise <- 0.05
-prob_head <- 0.85
+prob_head <- 0.75
 
 ```
 
@@ -93,7 +93,8 @@ beta_agent <- function(prev_alpha, prev_beta, other_prev) {
   rate <- alpha / (alpha + beta)
   
   # Choice based on expected value
-  choice <- rbinom(1, 1, rate)
+  #choice <- rbinom(1, 1, rate)
+  choice <- ifelse(rate >= 0.5, 1, 0)
   
   return(list(choice = choice, alpha = alpha, beta = beta))
 }
@@ -312,19 +313,23 @@ ggplot(df, aes(x = trial, y = cumulative_rateSelf, group = agent)) +
 ```{r}
 ggplot(df2, aes(x = trial, y = cumulative_rateSelf, group = agent)) +
   geom_line(alpha = 0.15, color = "steelblue") +
-  geom_line(
-    data = df_avg2,
-    aes(x = trial, y = mean_self, group = 1),
-    color = "red",
-    size = 1.2
-  ) +
-  labs(
-    title = "Cumulative Match Rate Across 100 Matchups",
-    x = "Trial",
-    y = "Cumulative Agreement"
-  ) +
+  geom_line(data = df_avg2, aes(x = trial, y = mean_self, group = 1), color = "red", size = 1.2) +
+  labs(title = "Cumulative Match Rate Across 100 Matchups: Beta vs Biased", x = "Trial", y = "Cumulative Matching Rate") +
   theme_minimal()
 ```
+
+```{r}
+ggplot(df2, aes(x = trial, y = cumulative_rateSelf, group = agent)) +
+  geom_line(alpha = 0.15, color = "steelblue") +
+  geom_line(data = df_avg2, aes(x = trial, y = mean_self, group = 1),
+            color = "red", size = 1.2) +
+  scale_x_continuous(limits = c(1, 120), expand = c(0, 1)) +
+  labs(title = "Cumulative Match Rate Across 100 Matchups: Beta Deterministic vs Biased",
+       x = "Trial", y = "Cumulative Matching Rate") +
+  theme_minimal()
+```
+
+
 
 
 
