@@ -1,0 +1,576 @@
+---
+title: "RL_agent"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(hrbrthemes)
+```
+
+```{r}
+trials = 120
+Self = rep(NA, trials)
+Other = rep(NA, trials)
+V = rep(NA,trials)
+```
+
+
+
+```{r}
+RandomAgent = function(rate){
+  choice = rbinom(1,1,rate)
+  return(choice)
+}
+```
+
+```{r}
+RandomAgent_noise = function(rate, noise){
+  choice = rbinom(1,1,rate)
+  if(rbinom(1, 1, noise)==1){choice = rbinom (1,1,0.5)} 
+  return(choice)
+}
+```
+
+
+```{r}
+WSLSAgent_f=function(prevChoice, feedback){
+  if(feedback == 0){
+    choice = prevChoice
+  }
+  else if (feedback == 1) {
+    choice = 1 -prevChoice 
+  }
+return(choice) 
+}
+```
+
+
+```{r}
+RLAgent = function(count, alpha, feedback, other_response) {
+    if(feedback==1)
+    {
+      shift = memory[count-1]
+    }
+    else
+      {
+    shift = other_response
+    }
+    memory[count] <<- memory[count-1] + alpha*(feedback - memory[count-1])
+  choice = rbinom(1,1,memory[count])
+  return(choice)
+}
+```
+```{r}
+# Now lets try it with a decay learning function.
+# We make a simple 1 / trials
+decay_memory = rep(NA,trials)
+RLAgent_decay = function(count,alpha, feedback, other_response) {
+    decay_memory[count] <<- alpha * count^(-0.5)
+    if(feedback==1)
+    {
+      shift = memory[count-1]
+    }
+    else{
+    shift = other_response
+    }
+    memory[count] <<- memory[count-1] + (decay_memory[count])*(shift - memory[count-1])
+  choice = rbinom(1,1,memory[count])
+  return(choice)
+}
+
+```
+```{r}
+
+  # Define variables
+trials = 120
+
+df_rand_RL = NULL
+feedback = NULL
+biased_agent_rate = 0.7
+noise = 0.05
+Self = rep(NA, trials)
+memory = rep(NA, trials)
+Other = rep(NA, trials)
+decay_memory = rep(NA,trials)
+  
+  # Create random data, does NOT need input
+
+ 
+  # For each learning rate..
+  for(learn_inc in seq(0,1,0.1)){
+    Self[1] = RandomAgent(0.5)
+    memory[1] = RandomAgent(0.5)
+    for(t in seq (trials)){
+    Other[t] = RandomAgent_noise(biased_agent_rate, noise)
+    }
+    for(i in 2:trials){
+      if(Self[i-1] == Other[i-1]){
+        feedback = 1
+      }
+      else{
+        feedback = 0
+      }
+      Self[i] = RLAgent(i, learn_inc, feedback, Other[i - 1])
+    }
+    temp = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other), learning_rates = learn_inc)
+    
+    if(exists("df_rand_RL"))
+    {
+      df_rand_RL = rbind(df_rand_RL, temp)
+    }
+    else{
+      df_rand_RL = temp
+    }
+    Other = rep(NA, trials)
+    Self = rep(NA, trials)
+    memory = rep(NA, trials)
+    decay_memory = rep(NA,trials)
+
+}
+```
+```{r}
+df_rand_RL = df_rand_RL %>% group_by(learning_rates) %>% mutate(cumulative_rate = cumsum(Self) / seq_along(Self) )
+df_rand_RL
+```
+
+
+```{r}
+plot_rand_RL = ggplot(df_rand_RL, aes(trial, cumulative_rate, group=learning_rates, color =learning_rates)) + geom_line () + geom_hline( yintercept = biased_agent_rate, linetype ="dashed") + ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic()
+plot_rand_RL
+```
+
+
+```{r}
+# We repeat the experiment
+
+trials = 120
+df_rand_RL_noise_LR = NULL
+feedback = NULL
+biased_agent_rate = 0.7
+noise = 0.05
+Self = rep(NA, trials)
+memory = rep(NA, trials)
+Other = rep(NA, trials)
+decay_memory = rep(NA,trials)
+
+  for(learn_inc in seq(0,1,0.1)){
+    Self[1] = RandomAgent(0.5)
+    memory[1] = RandomAgent(0.5)
+    for(t in seq (trials)){
+    Other[t] = RandomAgent_noise(biased_agent_rate, noise)
+    }
+    for(i in 2:trials){
+      if(Self[i-1] == Other[i-1]){
+        feedback = 1
+      }
+      else{
+        feedback = 0
+      }
+      Self[i] = RLAgent_decay(i, learn_inc, feedback, Other[i-1])
+    }
+    temp = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other), learning_rates = learn_inc, decay_memory = decay_memory)
+    
+    if(exists("df_rand_RL_noise_LR"))
+    {
+      df_rand_RL_noise_LR = rbind(df_rand_RL_noise_LR, temp)
+    }
+    else{
+      df_rand_RL_noise_LR = temp
+    }
+    Other = rep(NA, trials)
+    Self = rep(NA, trials)
+    memory = rep(NA, trials)
+    decay_memory = rep(NA,trials)
+
+}
+
+```
+```{r}
+df_rand_RL_noise_LR = df_rand_RL_noise_LR %>% group_by(learning_rates) %>% mutate(cumulative_rate = cumsum(Self) / seq_along(Self) )
+df_rand_RL_noise_LR
+```
+
+```{r}
+plot_rand_RL_noise_LR = ggplot(df_rand_RL_noise_LR, aes(x = trial)) +  
+  geom_line(aes(y = cumulative_rate, group = learning_rates, color = learning_rates)) +
+  geom_line(aes(y = decay_memory, group=learning_rates), color = "green")+
+  geom_hline( yintercept = biased_agent_rate, linetype ="dashed") + ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic() + 
+    labs(
+    title = "Cumulative Rate Across Incremented Learning Rate",
+    subtitle = "RL (Power Law Decay) vs Biased (70%) + Noise (5%)",
+    x = "Trial",
+    y = "Cumulative Rate",
+    caption = "Blue Line: Cumulative Rate
+    Green Line: Learning Rate Decay (Power Law)"
+  )
+plot_rand_RL_noise_LR
+```
+
+```{r}
+# We repeat the experiment
+
+trials = 120
+agent_num = 100
+df_rand_RL_noise = NULL
+feedback = NULL
+biased_agent_rate = 0.7
+noise = 0.05
+Self = rep(NA, trials)
+learning_rate_c = 1
+memory = rep(NA, trials)
+Other = rep(NA, trials)
+decay_memory = rep(NA,trials)
+  for(agent in 1:agent_num){
+    Self[1] = RandomAgent(0.5)
+    memory[1] = RandomAgent(0.5)
+    for(t in seq (trials)){
+    Other[t] = RandomAgent_noise(biased_agent_rate, noise)
+    }
+    for(i in 2:trials){
+      if(Self[i-1] == Other[i-1]){
+        feedback = 1
+      }
+      else{
+        feedback = 0
+      }
+      Self[i] = RLAgent_decay(i,learning_rate_c , feedback, Other[i-1])
+    }
+    temp = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other), agents = agent, expected_value = memory, decay_memory = decay_memory)
+    
+    if(exists("df_rand_RL_noise"))
+    {
+      df_rand_RL_noise = rbind(df_rand_RL_noise, temp)
+    }
+    else{
+      df_rand_RL_noise = temp
+    }
+    Other = rep(NA, trials)
+    Self = rep(NA, trials)
+    memory = rep(NA, trials)
+    decay_memory = rep(NA,trials)
+}
+
+```
+```{r}
+
+df_rand_RL_noise = df_rand_RL_noise %>%
+  group_by(agents) %>%  
+  mutate(cumulative_rate_self = cumsum(Self) / seq_along(Self)) %>%
+  ungroup()
+
+df_rand_RL_noise = df_rand_RL_noise %>%
+  group_by(agents) %>%  
+  mutate(cumulative_rate_feedback = cumsum(Feedback) / seq_along(Feedback)) %>%
+  ungroup()
+
+
+
+df_rand_RL_noise = df_rand_RL_noise %>%
+  group_by(trial) %>%
+  mutate(mean_cumulative_rate_self = mean(cumulative_rate_self, na.rm = TRUE)) %>%
+  ungroup()
+df_rand_RL_noise = df_rand_RL_noise %>%
+  group_by(trial) %>%
+  mutate(mean_cumulative_rate_feedback = mean(cumulative_rate_feedback, na.rm = TRUE)) %>%
+  ungroup()
+
+df_rand_RL_noise = df_rand_RL_noise %>%
+  group_by(trial) %>%
+  mutate(mean_expected_value = mean(expected_value, na.rm = TRUE)) %>%
+  ungroup()
+df_rand_RL_noise
+```
+```{r}
+plot_rand_RL_noise = ggplot(df_rand_RL_noise, aes(trial)) + geom_line(aes(y = cumulative_rate_self, group = agents), color = "grey",alpha = 0.3, size = 1) +
+  geom_hline(yintercept = biased_agent_rate, linetype = "dashed") +
+  # Mean line
+  geom_line(data = df_rand_RL_noise, 
+            aes(trial, mean_cumulative_rate_self),
+            color = "red", size = 1.5) +
+  geom_line(data = df_rand_RL_noise, 
+            aes(trial, mean_cumulative_rate_feedback),
+            color = "purple", size = 1.5) +
+  geom_line(data = df_rand_RL_noise, 
+            aes(trial, mean_expected_value),
+            color = "orange", size = 1.5) +
+    geom_line(data = df_rand_RL_noise, 
+            aes(trial, decay_memory),
+            color = "green", size = 1.5) +
+  ylim(0,1) + 
+    labs(
+    title = "Cumulative Match Rate Across 100 Matchups",
+    subtitle = "RL (Decay) vs Biased (70%)",
+    x = "Trial",
+    y = "Cumulative Rate",
+    caption = "Gray lines: Individual Agents (Self)
+    Red Line: Mean Cumulative Rate (Self) 
+    Purple Line: Mean Cumulative Rate (Feedback)
+    Green Line: Power Law Decay (Self)
+    Orange Line: Mean Expected Value"
+  )+
+  theme_classic()
+plot_rand_RL_noise
+```
+
+
+```{r}
+# Now for hte WSLS
+
+# We repeat the experiment
+
+trials = 120
+df_WSLS_RL = NULL
+feedback = NULL
+Self = rep(NA, trials)
+memory = rep(NA, trials)
+Other = rep(NA, trials)
+
+  for(learn_inc in seq(0,1,0.1)){
+    Self[1] = RandomAgent(0.5)
+    Other[1] = RandomAgent(0.5)
+    memory[1] = RandomAgent(0.5)
+    
+    for(i in 2:trials){
+      if(Self[i-1] == Other[i-1]){
+        feedback = 1
+      }
+      else{
+        feedback = 0
+      }
+      Other[i] = WSLSAgent_f(Other[i-1], feedback)
+      Self[i] = RLAgent(i, learn_inc, feedback, Other[i-1])
+    }
+    temp = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other), learning_rates = learn_inc)
+    
+    if(exists("df_WSLS_RL"))
+    {
+      df_WSLS_RL = rbind(df_WSLS_RL, temp)
+    }
+    else{
+      df_WSLS_RL = temp
+    }
+    Other = rep(NA, trials)
+    Self = rep(NA, trials)
+    memory = rep(NA, trials)
+}
+
+```
+```{r}
+
+df_WSLS_RL = df_WSLS_RL %>% group_by(learning_rates) %>% mutate(cumulative_rate = cumsum(Self) / seq_along(Self) )
+df_WSLS_RL
+```
+
+```{r}
+
+trials = 120
+df_WSLS_RL = NULL
+feedback = NULL
+Self = rep(NA, trials)
+memory = rep(NA, trials)
+Other = rep(NA, trials)
+
+  for(agent in 1:agent_num){
+    Self[1] = RandomAgent(0.5)
+    Other[1] = RandomAgent(0.5)
+    memory[1] = RandomAgent(0.5)
+    
+    for(i in 2:trials){
+      if(Self[i-1] == Other[i-1]){
+        feedback = 1
+      }
+      else{
+        feedback = 0
+      }
+      Other[i] = WSLSAgent_f(Other[i-1], feedback)
+      Self[i] = RLAgent(i, 0.3, feedback, Other[i-1])
+    }
+    temp = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other), agents = agent, expected_value = memory)
+    
+    if(exists("df_WSLS_RL"))
+    {
+      df_WSLS_RL = rbind(df_WSLS_RL, temp)
+    }
+    else{
+      df_WSLS_RL = temp
+    }
+    Other = rep(NA, trials)
+    Self = rep(NA, trials)
+    memory = rep(NA, trials)
+}
+
+```
+```{r}
+
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(agents) %>%  
+  mutate(cumulative_rate_self = cumsum(Self) / seq_along(Self)) %>%
+  ungroup()
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(agents) %>%  
+  mutate(cumulative_rate_other = cumsum(Other) / seq_along(Other)) %>%
+  ungroup()
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(agents) %>%  
+  mutate(cumulative_rate_feedback= cumsum(Feedback) / seq_along(Feedback)) %>%
+  ungroup()
+
+
+
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(trial) %>%
+  mutate(mean_cumulative_rate_self = mean(cumulative_rate_self, na.rm = TRUE)) %>%
+  ungroup()
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(trial) %>%
+  mutate(mean_cumulative_rate_other = mean(cumulative_rate_other, na.rm = TRUE)) %>%
+  ungroup()
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(trial) %>%
+  mutate(mean_cumulative_rate_feedback = mean(cumulative_rate_feedback, na.rm = TRUE)) %>%
+  ungroup()
+
+
+df_WSLS_RL = df_WSLS_RL %>%
+  group_by(trial) %>%
+  mutate(mean_expected_value = mean(expected_value, na.rm = TRUE)) %>%
+  ungroup()
+
+
+df_WSLS_RL
+```
+```{r}
+plot_WSLS_RL = ggplot(df_WSLS_RL, aes(trial)) + geom_line(aes(y = cumulative_rate_self, group = agents), color = "grey",alpha = 0.3, size = 1) +
+  
+  # Mean line
+  geom_line(data = df_WSLS_RL, 
+            aes(trial, mean_cumulative_rate_self),
+            color = "red", size = 1.5) +
+   geom_line(data = df_WSLS_RL, 
+            aes(trial, mean_cumulative_rate_feedback),
+            color = "purple", size = 1.5) +
+  
+    geom_line(data = df_WSLS_RL, 
+            aes(trial, mean_expected_value),
+            color = "orange", size = 1.5) +
+  ylim(0,1) + 
+  labs(
+    title = "Cumulative Match Rate Across 100 Matchups",
+    subtitle = "RL (Learning_Rate = 30%) vs WSLS",
+    x = "Trial",
+    y = "Cumulative Rate",
+    caption = "Gray lines: Individual agents (Self)
+    Red Line: Mean Cumulative Rate (Self)
+    Purple Line: Mean Cumulative Rate (Feedback)
+    Orange Line: Mean Expected Value"
+  )+
+  theme_classic() 
+plot_WSLS_RL
+```
+```{r}
+
+trials = 120
+df_WSLS_RL_LR = NULL
+feedback = NULL
+Self = rep(NA, trials)
+memory = rep(NA, trials)
+Other = rep(NA, trials)
+memory_decay = rep(NA, trials)
+  for(learn_inc in seq(0,1,0.1)){
+    Self[1] = RandomAgent(0.5)
+    Other[1] = RandomAgent(0.5)
+    memory[1] = RandomAgent(0.5)
+    
+    for(i in 2:trials){
+      if(Self[i-1] == Other[i-1]){
+        feedback = 1
+      }
+      else{
+        feedback = 0
+      }
+      Other[i] = WSLSAgent_f(Other[i-1], feedback)
+      Self[i] = RLAgent(i, learn_inc, feedback, Other[i-1])
+    }
+    temp = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other), learning_rates = learn_inc, expected_value = memory)
+    
+    if(exists("df_WSLS_RL_LR"))
+    {
+      df_WSLS_RL_LR = rbind(df_WSLS_RL_LR, temp)
+    }
+    else{
+      df_WSLS_RL_LR = temp
+    }
+    Other = rep(NA, trials)
+    Self = rep(NA, trials)
+    memory = rep(NA, trials)
+    memory_decay = rep(NA, trials)
+}
+
+```
+```{r}
+df_WSLS_RL_LR = df_WSLS_RL_LR %>% group_by(learning_rates) %>% mutate(cumulative_rate = cumsum(Self) / seq_along(Self) )
+
+```
+```{r}
+plot_WSLS_RL_LR = ggplot(df_WSLS_RL_LR, aes(trial)) + 
+    geom_line(aes(y = cumulative_rate, group=learning_rates, color =learning_rates))+ 
+    ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic() + 
+    labs(
+    title = "Cumulative Rate Across Incremented Learning Rate",
+    subtitle = "RL (Learning_Rate = 30%) vs WSLS",
+    x = "Trial",
+    y = "Cumulative Rate",
+  )
+plot_WSLS_RL_LR
+```
+
+
+```{r}
+plot_WSLS_RL = ggplot() + 
+  # Individual agents (semi-transparent)
+  geom_line(data = df_WSLS_RL, 
+            aes(trial, cumulative_rate, group = agents), 
+            color = "gray70", alpha = 0.3, size = 0.4) +
+  
+  # Mean cumulative rate
+  geom_line(data = df_WSLS_RL, 
+            aes(trial, mean_cumulative_rate, color = "Mean Rate"), 
+            size = 1.2) +
+  
+  # Expected value
+  geom_line(data = df_WSLS_RL, 
+            aes(trial, mean_expected_value, color = "Expected Value"), 
+            size = 1.2, linetype = "dotdash") +
+  
+  # Reference line
+  geom_hline(yintercept = biased_agent_rate, 
+             linetype = "dashed", color = "gray30", size = 0.7) + 
+  
+  # Colors and labels
+  scale_color_manual(name = "", 
+                     values = c("Mean Rate" = "#E41A1C", 
+                               "Expected Value" = "#984EA3")) +
+  
+  ylim(0,1) + 
+  labs(
+    title = "Cumulative Match Rate Across 100 Matchups",
+    subtitle = "RL vs WSLS",
+    x = "Trial",
+    y = "Cumulative Rate",
+    caption = "Gray lines: Individual agents"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "gray40", size = 11),
+    plot.caption = element_text(color = "gray40", size = 9, hjust = 0),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray90", size = 0.3)
+  )
+
+plot_WSLS_RL
+```
+
+
+

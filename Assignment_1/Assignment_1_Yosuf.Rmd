@@ -33,7 +33,7 @@ plan(multisession, workers = n_cores )
 
 
 ```{r}
-trials = 500
+trials = 120
 Self = rep(NA, trials)
 Other = rep(NA, trials)
 memory = rep(NA,trials)
@@ -71,40 +71,62 @@ InfiniteMemoryAgent= function(count, prevChoice, feedback){
   # Learning rate
   return(choice)
 }
-
-RLAgent = function(count, alpha, feedback){
-  V[count] <<- (V[count-1] + alpha*(feedback - V[count-1]))
+#
+RLAgent = function(count, alpha, feedback, V) {
+  if(count == 1) {
+    V[count] <- 0.5  
+  } else {
+    V[count] <- V[count-1] + alpha*(feedback - V[count-1])
+  }
   choice = rbinom(1,1,V[count])
   return(choice)
 }
 ```
 
 ```{r}
-learning_rate = 0.2
-rate = 0.7
+learning_rate = 0.1
+rate = 0.8
 Self[1] = RandomAgent(0.5)
 V[1] = 0.5
 
 ```
-
 ```{r}
-
 for(t in seq (trials)){
   Other[t] = RandomAgent(rate)
 }
+Other
+```
 
-result[1] = if(Self[1]==Other[1]){feedback = 1}else{feedback = 0}
+```{r}
+df_rand_RL = NULL
 
-for(i in 2:trials){
-  if(Self[i-1] == Other[i-1]){
-    feedback = 1
+for(rate_num in seq(0,1,0.1)){
+  Self = rep(NA, trials)
+  V = rep(NA, trials)
+  Other = rep(NA, trials)
+  result = rep(NA,trials)
+  
+  Self[1] = RandomAgent(0.5)
+  result[1] = if(Self[1]==Other[1]){feedback = 1}else{feedback = 0}
+  for(i in 2:trials){
+    if(Self[i-1] == Other[i-1]){
+      feedback = Self[i-1]
+    }
+    else{
+      feedback = Other[i-1]
+    }
+    Self[i] = RLAgent(i, rate, feedback, V)
+    result[i] = feedback
   }
+  
+  temp = tibble(trial = seq(trials), choice = Self, rate_num)
+  if (exists("d1")){
+    df_rand_RL < - rbind(df_rand_RL, temp)
+  } 
   else{
-    feedback = 0
+    d1 = temp
   }
-  Self[i] = RLAgent(i, learning_rate, feedback)
-  result[i] = feedback
-  }
+}
 ```
 
 ```{r}
@@ -120,8 +142,42 @@ print(result)
 ```{r}
 df = tibble(Self, Other, trial = seq(trials), Feedback = as.numeric(Self==Other))
 
-ggplot(df) + theme_classic() + geom_line(color ="red", aes(trial, Self),size = 1) + geom_line(color ="blue", aes(trial, Other),size = 1)+ geom_line(color="green", aes(trial,V), size = 1.5) + geom_hline(yintercept=rate, size = 1.5)  + ggtitle("RLAgent(red) vs BiasedAgent(blue) + Expected Value(green)") + ylab("Choices 1/0")
+df = df %>%
+  mutate(
+    cumulative_rateSelf = cumsum(Feedback) / seq_along(Feedback),
+    cumulative_rateOther = cumsum(1 - Feedback) / seq_along(Feedback)
+  )
+
+ggplot(df) + theme_classic() + geom_line(color ="red", aes(trial, Self),size = 1) + geom_line(color ="blue", aes(trial, Other),size = 1)+ geom_line(color="green", aes(trial,V), size = 1.5) + geom_line(color="purple", aes(trial,cumulative_rateSelf), size = 1.5) + geom_hline(yintercept=rate, size = 1.5)  + ggtitle("RLAgent(red) vs BiasedAgent(blue) + Expected Value(green)") + ylab("Choices 1/0")
+
 ```
+```{r}
+cumsum(c(0,0,1)) / seq_along(c(0,0,1))
+```
+
+
+
+```{r}
+
+for(t in seq (trials)){
+  Other[t] = RandomAgent(rate)
+}
+
+result[1] = if(Self[1]==Other[1]){feedback = 1}else{feedback = 0}
+
+for(i in 2:trials){
+  if(Self[i-1] == Other[i-1]){
+    feedback = Self[i-1]
+  }
+  else{
+    feedback = Other[i-1]
+  }
+  Self[i] = RLAgent(i, learning_rate, feedback)
+  result[i] = feedback
+  }
+```
+
+
 ```{r}
 df = df %>% mutate(expected_value = V)
 head(df)
