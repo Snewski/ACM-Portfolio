@@ -1,6 +1,6 @@
-## ACM-Portfolio ##
+# ACM-Portfolio #
 
-# Assignment 1 #
+## Assignment 1 ##
 In Assignment 1, two strategies were implemented to play the Matching Pennies game. 
 
 1) Beta Strategy
