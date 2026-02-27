@@ -1,0 +1,111 @@
+---
+title: "Assignment_2"
+output: html_document
+---
+
+
+
+
+
+data would be n number of trials, and h choices.
+
+
+```{r}
+
+
+
+
+
+```
+
+
+
+```{r}
+# Biased Model
+stan_model <- "
+
+data {
+  int <lower=1> n;
+  array[n] <lower=0, upper=1> h;
+}
+
+params {
+ real <lower=0, upper=1> theta;
+}
+
+
+model{
+  target += beta_lpdf(theta | 1, 1); 
+  target += bernoulli_lpmf(h | theta)
+}
+
+
+"
+```
+
+
+```{r}
+
+beta_model <- "
+
+data {
+  int <lower=1> n;
+  array[n] <lower=0, upper=1> h;
+  array[n] <lower=0, upper=1> other;
+}
+
+params {
+  real <lower=0, upper=inf> alpha;
+  real <lower=0, upper=inf> beta;
+}
+
+trial params {
+  array[n] alpha;
+  array[n] beta;
+  array[n] theta;
+
+ // Initial values?
+  alpha[1] = alpha
+  beta[1] = beta
+  theta[1] = alpha/(alpha + beta)
+
+ // Updating on trial basis 
+  for (t in 2:n) {
+    alpha[n] = alpha[n-1] + other[n-1]
+    beta[n] = beta[n-1] + (1-other[n-1])
+    theta[n] = alpha[n]/(alpha[n] + beta[n])
+  }
+
+}
+
+model{
+
+  target += 
+  target += 
+  
+  for(t in 1:n) {
+    target += bernoulli_lpmf(h[t] | theta[t]);
+  }
+  
+}
+
+generated quantities{
+
+
+}
+
+
+" 
+
+
+
+
+
+
+```
+
+
+
+
+
+
