@@ -4,6 +4,15 @@ output: html_document
 ---
 
 
+```{r}
+library(cmdstanr)
+library(posterior)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+
+```
 
 
 
@@ -11,101 +20,189 @@ data would be n number of trials, and h choices.
 
 
 ```{r}
+# Generating data #
+
+biased_agent_noise <- function(prob_head, noise) {
+  
+  choice <- rbinom(1, 1, prob_head)
+  
+  if(rbinom(1, 1, noise)==1){choice =rbinom(1,1,0.5)}
+  
+  return(choice)
+}
 
 
+beta_agent <- function(prev_alpha, prev_beta, other_prev, mode = "deterministic") {
+  
+  # Update parameters
+  alpha <- prev_alpha + other_prev
+  beta  <- prev_beta  + (1 - other_prev)
+  
+  # Expected value of posterior
+  rate <- alpha / (alpha + beta)
+  
+  # Choice rule based on mode
+  if (mode == "probabilistic") {
+    choice <- rbinom(1, 1, rate)
+  } else if (mode == "deterministic") {
+    choice <- ifelse(rate >= 0.5, 1, 0)
+  } else {
+    stop("mode must be either 'probabilistic' or 'deterministic'")
+  }
+  
+  return(list(choice = choice, alpha = alpha, beta = beta))
+}
 
+
+simulate_Beta_vs_Biased <- function(trials, prob_head, noise, mode = "deterministic") {
+  
+  # storage
+  Beta_choice   <- rep(NA, trials)
+  Biased_choice <- rep(NA, trials)
+  alpha <- beta <- rep(NA, trials)
+  
+  # initial states
+  Beta_choice[1]   <- rbinom(1, 1, 0.5)
+  Biased_choice[1] <- rbinom(1, 1, 0.5)
+  alpha[1] <- 1
+  beta[1]  <- 1
+  
+  for (t in 2:trials) {
+    
+    # --- Biased agent ---
+    Biased_choice[t] <- biased_agent_noise(prob_head, noise)
+    
+    # --- Beta agent ---
+    res <- beta_agent(alpha[t-1], beta[t-1], Biased_choice[t-1], mode = mode)
+    Beta_choice[t] <- res$choice
+    alpha[t] <- res$alpha
+    beta[t]  <- res$beta
+  }
+  
+  return(list(
+    Beta   = Beta_choice,
+    Biased = Biased_choice,
+    alpha  = alpha,
+    beta   = beta
+  ))
+}
+
+
+Beta_D_vs_Biased <- simulate_Beta_vs_Biased(120, 0.8, 0.15, mode = 'probabilistic')
+
+data <- list(n = 120, self = Beta_D_vs_Biased$Beta, other = Beta_D_vs_Biased$Biased)
 
 
 ```
-
 
 
 ```{r}
-# Biased Model
-stan_model <- "
+mod <- cmdstan_model("Beta.stan")
+```
 
-data {
-  int <lower=1> n;
-  array[n] <lower=0, upper=1> h;
-}
+```{r}
+fit <- mod$sample(
+  data = data,
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 500,
+  max_treedepth = 10,
+  adapt_delta = 0.8
+)
+```
 
-params {
- real <lower=0, upper=1> theta;
-}
+```{r}
+fit$summary()
+```
+
+```{r}
+draws <- as_draws_df(fit$draws())
 
 
-model{
-  target += beta_lpdf(theta | 1, 1); 
-  target += bernoulli_lpmf(h | theta)
-}
 
+```
 
-"
+```{r}
+
+n <- data$n  # number of trials
+
+theta_prior_summary <- draws %>%
+  select(starts_with("theta_prior")) %>%
+  pivot_longer(everything(),
+               names_to = "trial",
+               values_to = "theta_prior") %>%
+  mutate(trial = as.integer(gsub("theta_prior\\[|\\]", "", trial))) %>%
+  group_by(trial) %>%
+  summarise(theta_prior_mean = mean(theta_prior))
+
+theta_post_summary <- draws %>%
+  select(starts_with("theta_posterior")) %>%
+  pivot_longer(everything(),
+               names_to = "trial",
+               values_to = "theta_posterior") %>%
+  mutate(trial = as.integer(gsub("theta_posterior\\[|\\]", "", trial))) %>%
+  group_by(trial) %>%
+  summarise(theta_post_mean = mean(theta_posterior))
+
+beliefs <- left_join(theta_prior_summary, theta_post_summary, by = "trial")
+
 ```
 
 
 ```{r}
 
-beta_model <- "
-
-data {
-  int <lower=1> n;
-  array[n] <lower=0, upper=1> h;
-  array[n] <lower=0, upper=1> other;
-}
-
-params {
-  real <lower=0, upper=inf> alpha;
-  real <lower=0, upper=inf> beta;
-}
-
-trial params {
-  array[n] alpha;
-  array[n] beta;
-  array[n] theta;
-
- // Initial values?
-  alpha[1] = alpha
-  beta[1] = beta
-  theta[1] = alpha/(alpha + beta)
-
- // Updating on trial basis 
-  for (t in 2:n) {
-    alpha[n] = alpha[n-1] + other[n-1]
-    beta[n] = beta[n-1] + (1-other[n-1])
-    theta[n] = alpha[n]/(alpha[n] + beta[n])
-  }
-
-}
-
-model{
-
-  target += 
-  target += 
-  
-  for(t in 1:n) {
-    target += bernoulli_lpmf(h[t] | theta[t]);
-  }
-  
-}
-
-generated quantities{
-
-
-}
-
-
-" 
-
-
-
-
+ggplot(beliefs, aes(x = trial)) +
+  geom_line(aes(y = theta_prior_mean, colour = "Prior"), size = 1) +
+  geom_line(aes(y = theta_post_mean, colour = "Posterior"), size = 1) +
+  scale_colour_manual(values = c("Prior" = "steelblue", "Posterior" = "firebrick")) +
+  labs(y = "Belief (theta)", colour = "", title = "Prior vs Posterior Beliefs") +
+  theme_minimal()
 
 
 ```
 
 
+```{r}
 
+prior_pred_summary <- draws %>%
+  select(starts_with("prior_preds")) %>%
+  pivot_longer(everything(),
+               names_to = "trial",
+               values_to = "prior_pred") %>%
+  mutate(trial = as.integer(gsub("prior_preds\\[|\\]", "", trial))) %>%
+  group_by(trial) %>%
+  summarise(prior_pred_mean = mean(prior_pred))
+
+post_pred_summary <- draws %>%
+  select(starts_with("posterior_preds")) %>%
+  pivot_longer(everything(),
+               names_to = "trial",
+               values_to = "posterior_pred") %>%
+  mutate(trial = as.integer(gsub("posterior_preds\\[|\\]", "", trial))) %>%
+  group_by(trial) %>%
+  summarise(posterior_pred_mean = mean(posterior_pred))
+
+preds <- left_join(prior_pred_summary, post_pred_summary, by = "trial")
+
+```
+
+
+```{r}
+
+ggplot(preds, aes(x = trial)) +
+  geom_line(aes(y = prior_pred_mean, colour = "Prior predictive"), size = 1) +
+  geom_line(aes(y = posterior_pred_mean, colour = "Posterior predictive"), size = 1) +
+  scale_colour_manual(values = c("Prior predictive" = "steelblue",
+                                 "Posterior predictive" = "firebrick")) +
+  labs(y = "Predicted probability", colour = "",
+       title = "Prior vs Posterior Predictive Performance") +
+  theme_minimal()
+
+
+```
 
 
 
