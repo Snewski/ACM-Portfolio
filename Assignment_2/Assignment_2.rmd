@@ -1,0 +1,452 @@
+In the assignment you need to build and validate a cognitive model of matching pennies behavior using Stan. As an outcome of this you will have to produce a text (+ plots) document (linked to a github repo) in which you:
+  
+  describe the model you are working on (N.B. it doesn't need to be one from Assignment 1)
+   - showcase a commented version of the stan model (what does each line do?)
+   - discuss model quality of the model (predictive prior and posterior checks, prior-posterior update checks, etc.)
+   - describe a process of parameter recovery (why are you doing it?, how are you doing it?)
+   - discuss the results: can you recover the parameter values? How many trials should be used at least to properly recover the parameters? What’s the role of priors? Add relevant plot(s).
+
+N.B. to pass it's enough to use the single agent model, but if you want to learn more (at the cost of more time investment), you could
+                                         
+(optional) Build the multilevel version of your model and run the parameter recovery on it.
+(optional) Analyze an empirical dataset
+                                         
+                                         Empirical datasets:
+                                           
+Guide to the data: https://www.dropbox.com/s/m1u5roo4z0f2emr/readme.txt?dl=0
+Non-human primates dataset: https://www.dropbox.com/s/8fj7k5jk8mn4j63/mp_primates.csv?dl=0
+Human primates dataset (former CogSci'ers):
+ https://www.dropbox.com/s/9z6hcg9b4yhzgbu/mp_students.csv?dl=0
+ https://www.dropbox.com/s/r2ok23vjewyelaz/mp_students_22.csv?dl=0
+Clinical dataset (schizophrenia and controls): https://www.dropbox.com/s/dxj9f8txg1yax68/mp_schizophrenia.csv?dl=0
+
+## Packages 
+```{r}
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future        # Future backend
+)
+
+# parallel setup
+n_cores <- parallel::detectCores() -2
+plan(multisession, workers = n_cores)
+
+#default ggplot theme
+theme_set(theme_classic())
+
+```
+
+# Simulating data
+
+```{r simulating data}
+# Trials and agents from Yosuf's code
+
+set.seed(123)
+trials <-  120
+
+
+RandomAgent <-  function(rate){
+  choice <-  rbinom(1,1,rate)
+  # return(choice)
+}
+
+
+WSLSAgent_f=function(prevChoice, feedback){
+  if(feedback == 1){
+    choice = prevChoice
+  }
+  else if (feedback == 0) {
+    choice = 1 -prevChoice 
+  }
+return(choice) 
+}
+
+
+InfiniteMemoryAgent= function(count, prevChoice, feedback){
+  if(feedback == 0)
+  {
+    newChoice = 1 - prevChoice
+  }
+  else{
+    newChoice = prevChoice
+  }
+  memory[count] = newChoice
+  EV = sum(memory,na.rm = TRUE) / count
+  choice = rbinom(1,1,EV)
+  # Learning rate
+  return(choice)
+}
+
+
+# RLAgent = function(count, alpha, feedback, V) {
+#   if(count == 1) {
+#     V[count] <- 0.5  
+#   } else {
+#     V[count] <- V[count-1] + alpha*(feedback - V[count-1])
+#   }
+#   choice = rbinom(1,1,V[count])
+#   return(choice)
+# }
+
+RLAgent <- function(alpha, trials) {
+  V      <- rep(NA, trials)
+  choice <- rep(NA, trials)
+  
+  V[1]      <- 0.5                          # initialize expected value
+  choice[1] <- rbinom(1, 1, V[1])           # first choice is random
+  
+  for (t in 2:trials) {
+    # RW update: move V toward the last outcome
+    V[t]      <- V[t-1] + alpha * (choice[t-1] - V[t-1])
+    choice[t] <- rbinom(1, 1, V[t])
+  }
+  
+  return(list(choice = choice, V = V))
+}
+```
+
+```{r}
+# simulate one agent with known params
+# "true" values for later recovery
+
+true_alpha <- 0.3
+true_beta <- 2.0
+
+# opponent - random agent
+Other <- rbinom(trials, 1, 0.5)
+
+# Self - RL agent
+Self <-  rep(NA, trials)
+# Other  <- rep(NA, trials)
+# memory <- rep(NA,trials)
+# result <- rep(NA,trials)
+V <- rep(NA,trials)
+V[1] <- 0.5
+Self[1] <- rbinom(1, 1, V[1])
+
+for (t in 2:trials){
+  V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
+  # softmax
+  p <- 1/(1 + exp(-true_beta * (V[t] - 0.5)))
+  Self[t] <- rbinom(1, 1, p)
+}
+
+# feedback
+feedback <- as.integer(Self == Other)
+```
+
+```{r data-prep}
+# preparing data for STAN
+data_for_stan <- list(
+  n = trials,
+  players = 1L, 
+  choice = Self, # agent's choices - 0 or 1
+  feedback = feedback,
+  prior_alpha_m = 0,
+  prior_alpha_sd = 1,
+  prior_beta_m = 0, 
+  prior_beta_sd = 1
+)
+```
+
+
+# STAN model
+
+*for now this is all from the slides*
+```{r}
+stan_file_RL <- here("Assignment_2",  "model_outline.stan")
+
+mod_RL <- cmdstan_model(
+  stan_file_RL,
+  cpp_options = list(stan_threads = FALSE),
+  stanc_options = list("O1")
+  )
+```
+
+```{r fitting-model}
+# Sample from the posterior distribution using MCMC
+fit_RL <- mod_RL$sample(
+  data = data_for_stan, # should make this
+  seed = 123, # reproducibility
+  chains = 4, # nr. of MArkov-chains
+  parallel_chains = 4, #run them in parallel
+  # threads_per_chain = 1, # within-chain parallelization, here just in case
+  iter_warmup = 1000, # get discarded
+  iter_sampling = 2000, 
+  refresh = 500, # how often should progress updates be printed
+  max_treedepth = 10, # complexity of mcmc steps
+  adapt_delta = 0.99 # target acceptance rate
+  ) 
+```
+
+
+# Model quality checks
+
+```{r}
+# summary of params
+fit_RL$summary()
+
+# divergences
+fit_RL$diagnostic_summary
+```
+
+```{r extract-draws}
+# converting posterior draws to tidy df
+draws_df <- fit_RL$draws(format = "df")
+
+glimpse(draws_df)
+
+```
+
+
+## Generating prior and posterior predictions
+- priors
+- simulations from the prior
+- simulations from the posterior
+
+To do: 
+- separate for alpha and beta once the structure is more clarified
+- find a way to feed more educated guesses to the model
+
+
+## Prior-posterior update checks
+
+```{r}
+# Alpha
+ggplot(draws_df) +
+  geom_density(aes(alpha_prior),     fill = "red",  alpha = 0.3) +
+  geom_density(aes(alpha),           fill = "blue", alpha = 0.3) +
+  geom_vline(xintercept = true_alpha, linetype = "dashed") +  # true value
+  labs(
+    title = "Prior-posterior update: alpha (learning rate)",
+    subtitle = "Red = prior, Blue = posterior, dashed = true value",
+    x = "Alpha", y = "Density"
+  )
+
+# Beta
+ggplot(draws_df) +
+  geom_density(aes(beta_prior),     fill = "red",  alpha = 0.3) +
+  geom_density(aes(beta),           fill = "blue", alpha = 0.3) +
+  geom_vline(xintercept = true_beta, linetype = "dashed") +
+  labs(
+    title = "Prior-posterior update: beta (inverse temperature)",
+    subtitle = "Red = prior, Blue = posterior, dashed = true value",
+    x = "Beta", y = "Density"
+  )
+```
+
+
+```{r}
+# RICCARDO
+
+# # alpha
+# ggplot(draws_df)+
+#   geom_density(aes(alpha_posterior), fill = "blue", alpha = 0.3) + 
+#   geom_density(aes(alpha_prior), fill = "red", alpha = 0.3) +
+#   geom_vline(xintercept = 0.8)+
+#   xlab("Rate") +
+#   ylab("Posterior Density")+
+#   theme_classic()
+# 
+# # beta
+# ggplot(draws_df) +
+#   geom_density(aes(beta_prior),     fill = "red",  alpha = 0.3) +
+#   geom_density(aes(beta),           fill = "blue", alpha = 0.3) +
+#   geom_vline(xintercept = true_beta, linetype = "dashed") +
+#   labs(
+#     title = "Prior-posterior update: beta (inverse temperature)",
+#     subtitle = "Red = prior, Blue = posterior, dashed = true value",
+#     x = "Beta", y = "Density"
+#   )
+```
+
+## Prior predictive check
+
+```{r}
+prior_pred_cols <- draws_df %>% 
+  select(starts_with("choice_prior_pred"))
+
+# Mean predicted choice per trial across draws
+prior_pred_mean <- colMeans(prior_pred_cols)
+
+ggplot(tibble(trial = 1:trials, pred = prior_pred_mean)) +
+  geom_line(aes(trial, pred)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray") +
+  ylim(0, 1) +
+  labs(
+    title = "Prior predictive check: mean predicted choice per trial",
+    x = "Trial", y = "P(choice = 1)"
+  )
+```
+
+
+```{r}
+# RICCARDO
+
+# # prior predictive check
+# ggplot(draws_df) +
+#   geom_histogram(aes(prior_preds), color = "darkblue", fill = "blue",
+#                  alpha = 0.3, bins = 90) +
+#   geom_point(x = sum(data$choice), y = 0, color = "red", shape = 17, size = 5) +
+#   xlab("Predicted rifht hands out of 120 trials")+
+#   ylab("Posterior count")+
+#   theme_classic()
+# 
+# 
+# ggplot(draws_df) + # prior rate = inv_logit of Normal(0,3)
+#   geom_histogram(aes(prior_preds), color = "darkblue", fill = "blue",
+#                  alpha = 0.3) +
+#   xlab("Predicted right hands out of 120 trials")+
+#   ylab("Posterior count")+
+#   theme_classic()
+# 
+# # this is Riccardo's code, from here draws_df is missing, as well as a way to pull prior_preds from the model
+```
+
+
+## Posterior predictive checks
+
+```{r}
+post_pred_cols <- draws_df %>% 
+  select(starts_with("choice_posterior_pred"))
+
+post_pred_mean <- colMeans(post_pred_cols)
+
+ggplot(tibble(trial = 1:trials,
+              posterior = post_pred_mean,
+              actual    = Self)) +
+  geom_line(aes(trial, actual),    color = "black", alpha = 0.4) +
+  geom_line(aes(trial, posterior), color = "blue",  alpha = 0.8) +
+  ylim(0, 1) +
+  labs(
+    title = "Posterior predictive check",
+    subtitle = "Black = actual choices, Blue = model predictions",
+    x = "Trial", y = "P(choice = 1)"
+  )
+```
+
+
+```{r}
+# RICCARDO
+
+# ggplot(draws_df)+
+#   geom_histogram(aes(alpha_prior_preds),
+#                  color = "lightblue", fill = "blue", 
+#                  alpha = 0.3, bins = 90) +
+#   geom_histogram(aes(alpha_posterior_preds),
+#                  color = "darkblue", fill = "blue", 
+#                  alpha = 0.3, bins = 90)+
+#   geom_point(x = sum(data$choice), y = 0, color = "red",
+#              shape = 17, size = 5) +
+#   xlab("Predicted heads out of 120 trials") +
+#   ylab("Density")+
+#   theme_classic()
+
+```
+
+
+# Parameter recovery
+
+```{r}
+# recovery fun for a single alpha-beta pair
+
+recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  
+  # simulating data from known params
+  V <- rep(NA, trials)
+  choice <- rep(NA, trials)
+  Other <- rbinom(trials, 1, 0.5)
+  V[1] <- 0.5
+  choice[1] <- rbinom(1, 1, V[1])
+  
+  for (t in 2:trials) {
+    V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
+    p <- 1 / (1 + exp(-true_beta * (V[t] - 0.5)))
+    choice[t] <- rbinom(1, 1, p)
+  }
+  
+  feedback <- as.integer(choice == Other)
+  
+  # Fit model
+  stan_data <- list(
+    n = trials,
+    players = 1L, 
+    choice = choice,
+    feedback = feedback,
+    prior_alpha_m = 0, prior_alpha_sd = 1,
+    prior_beta_m = 0, prior_beta_sd = 1
+  )
+  
+  fit <- mod_RL$sample(
+    data = stan_data,
+    seed = 123,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 2000,
+    refresh = 0, # silent for recovery loop
+    adapt_delta = 0.99
+  )
+  
+  # get posterior means and 90% credible intervals
+  summ <- fit$summary(c("alpha", "beta"))
+  
+  tibble(
+    true_alpha = true_alpha,
+    true_beta = true_beta,
+    est_alpha = summ$mean[summ$variable == "alpha"],
+    est_beta = summ$mean[summ$variable == "beta"],
+    lo_alpha = summ$q5[summ$variable == "alpha"],
+    hi_alpha = summ$q95[summ$variable == "alpha"],
+    lo_beta = summ$q5[summ$variable == "beta"],
+    hi_beta = summ$q95[summ$variable == "beta"],
+    
+  )
+}
+
+# grid of param combinations to recover
+recovery_grid <- expand_grid(
+  true_alpha = c(0.1, 0.3, 0.5, 0.7, 0.9),
+  true_beta = c(0.5, 1.0, 2.0, 4.0)
+)
+
+# running recovery in parallel
+recovery_results <- #future_
+pmap_dfr(
+  recovery_grid,
+  ~ recover_params(..1, ..2, trials = 120),
+  .options = furrr_options(seed = TRUE)
+)
+  
+```
+
+```{r}
+# plotting param recov results
+
+# alpha 
+ggplot(recovery_results, aes(true_alpha, est_alpha)) +
+  geom_pointrange(aes(ymin = lo_alpha, ymax = hi_alpha), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Parameter recovery: alpha",
+    subtitle = "Points = posterior mean, bars = 90% CI, dashed = perfect recovery",
+    x = "True alpha", y = "Estimated alpha"
+  )
+
+# beta
+ggplot(recovery_results, aes(true_beta, est_beta)) +
+  geom_pointrange(aes(ymin = lo_beta, ymax = hi_beta), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Parameter recovery: beta",
+    subtitle = "Points = posterior mean, bars = 90% CI, dashed = perfect recovery",
+    x = "True beta", y = "Estimated beta"
+  )
+```
+
