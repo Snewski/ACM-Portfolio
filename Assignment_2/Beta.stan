@@ -39,33 +39,28 @@ model {
 }
 
 generated quantities {
-  // Should change this to include alpha & beta.
-  array[n] real<lower=0, upper=1> theta_prior;
+  array[n] real<lower=0, upper=1> theta_t0;
   array[n] real<lower=0, upper=1> theta_posterior;
-  array[n] real<lower=0, upper=1> prior_preds;
-  array[n] real<lower=0, upper=1> posterior_preds;
+  array[n] int prior_preds;
+  array[n] int posterior_preds;
 
-  
-  // Should change this to utilize beta_rng()
-  for (t in 1:n) {
+  // --- initial values ---
+  theta_t0[1] = beta_rng(alpha[1], beta[1]);
+  theta_posterior[1]  = beta_rng(alpha[1], beta[1]);
 
-    // prior mean before observing trial t
-    theta_prior[t] = alpha[t] / (alpha[t] + beta[t]);
+  prior_preds[1]     = bernoulli_rng(theta_t0[1]);
+  posterior_preds[1] = bernoulli_rng(theta_posterior[1]);
 
-    // posterior mean after observing trial t
-    if (t < n) {
-      real a_post = alpha[t] + other[t];
-      real b_post = beta[t] + (1 - other[t]);
-      theta_posterior[t] = a_post / (a_post + b_post);
-    } else {
-      // last trial: posterior = prior (no future update)
-      theta_posterior[t] = theta_prior[t];
-    }
+  // --- recursive steps ---
+  for (t in 2:n) {
 
-    // prior predictive sample
-    prior_preds[t] = bernoulli_rng(theta_prior[t]);
+    theta_t0[t] = beta_rng(alpha[1], beta[1]);
+    
+    // sample θ from prior and posterior (same distribution)
+    theta_posterior[t]  = beta_rng(alpha[t-1], beta[t-1]);
 
-    // posterior predictive sample
+    // Bernoulli predictions
+    prior_preds[t]     = bernoulli_rng(theta_t0[t]);
     posterior_preds[t] = bernoulli_rng(theta_posterior[t]);
   }
 }

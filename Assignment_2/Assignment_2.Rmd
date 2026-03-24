@@ -10,6 +10,7 @@ library(posterior)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+library(bayesplot)
 
 
 ```
@@ -121,88 +122,10 @@ fit$summary()
 ```{r}
 draws <- as_draws_df(fit$draws())
 
-
-
-```
-
-```{r}
-
-n <- data$n  # number of trials
-
-theta_prior_summary <- draws %>%
-  select(starts_with("theta_prior")) %>%
-  pivot_longer(everything(),
-               names_to = "trial",
-               values_to = "theta_prior") %>%
-  mutate(trial = as.integer(gsub("theta_prior\\[|\\]", "", trial))) %>%
-  group_by(trial) %>%
-  summarise(theta_prior_mean = mean(theta_prior))
-
-theta_post_summary <- draws %>%
-  select(starts_with("theta_posterior")) %>%
-  pivot_longer(everything(),
-               names_to = "trial",
-               values_to = "theta_posterior") %>%
-  mutate(trial = as.integer(gsub("theta_posterior\\[|\\]", "", trial))) %>%
-  group_by(trial) %>%
-  summarise(theta_post_mean = mean(theta_posterior))
-
-beliefs <- left_join(theta_prior_summary, theta_post_summary, by = "trial")
-
 ```
 
 
-```{r}
 
-ggplot(beliefs, aes(x = trial)) +
-  geom_line(aes(y = theta_prior_mean, colour = "Prior"), size = 1) +
-  geom_line(aes(y = theta_post_mean, colour = "Posterior"), size = 1) +
-  scale_colour_manual(values = c("Prior" = "steelblue", "Posterior" = "firebrick")) +
-  labs(y = "Belief (theta)", colour = "", title = "Prior vs Posterior Beliefs") +
-  theme_minimal()
-
-
-```
-
-
-```{r}
-
-prior_pred_summary <- draws %>%
-  select(starts_with("prior_preds")) %>%
-  pivot_longer(everything(),
-               names_to = "trial",
-               values_to = "prior_pred") %>%
-  mutate(trial = as.integer(gsub("prior_preds\\[|\\]", "", trial))) %>%
-  group_by(trial) %>%
-  summarise(prior_pred_mean = mean(prior_pred))
-
-post_pred_summary <- draws %>%
-  select(starts_with("posterior_preds")) %>%
-  pivot_longer(everything(),
-               names_to = "trial",
-               values_to = "posterior_pred") %>%
-  mutate(trial = as.integer(gsub("posterior_preds\\[|\\]", "", trial))) %>%
-  group_by(trial) %>%
-  summarise(posterior_pred_mean = mean(posterior_pred))
-
-preds <- left_join(prior_pred_summary, post_pred_summary, by = "trial")
-
-```
-
-
-```{r}
-
-ggplot(preds, aes(x = trial)) +
-  geom_line(aes(y = prior_pred_mean, colour = "Prior predictive"), size = 1) +
-  geom_line(aes(y = posterior_pred_mean, colour = "Posterior predictive"), size = 1) +
-  scale_colour_manual(values = c("Prior predictive" = "steelblue",
-                                 "Posterior predictive" = "firebrick")) +
-  labs(y = "Predicted probability", colour = "",
-       title = "Prior vs Posterior Predictive Performance") +
-  theme_minimal()
-
-
-```
 
 
 
