@@ -50,10 +50,10 @@ set.seed(123)
 trials <-  120
 
 
-RandomAgent <-  function(rate){
-  choice <-  rbinom(1,1,rate)
-  # return(choice)
-}
+# RandomAgent <-  function(rate){
+#   choice <-  rbinom(1,1,rate)
+#   # return(choice)
+# }
 
 
 WSLSAgent_f=function(prevChoice, feedback){
@@ -67,20 +67,20 @@ return(choice)
 }
 
 
-InfiniteMemoryAgent= function(count, prevChoice, feedback){
-  if(feedback == 0)
-  {
-    newChoice = 1 - prevChoice
-  }
-  else{
-    newChoice = prevChoice
-  }
-  memory[count] = newChoice
-  EV = sum(memory,na.rm = TRUE) / count
-  choice = rbinom(1,1,EV)
-  # Learning rate
-  return(choice)
-}
+# InfiniteMemoryAgent= function(count, prevChoice, feedback){
+#   if(feedback == 0)
+#   {
+#     newChoice = 1 - prevChoice
+#   }
+#   else{
+#     newChoice = prevChoice
+#   }
+#   memory[count] = newChoice
+#   EV = sum(memory,na.rm = TRUE) / count
+#   choice = rbinom(1,1,EV)
+#   # Learning rate
+#   return(choice)
+# }
 
 
 # RLAgent = function(count, alpha, feedback, V) {
@@ -111,33 +111,66 @@ RLAgent <- function(alpha, trials) {
 ```
 
 ```{r}
-# simulate one agent with known params
-# "true" values for later recovery
-
+# true values for later recovery
 true_alpha <- 0.3
-true_beta <- 2.0
+true_beta  <- 2.0
 
-# opponent - random agent
-Other <- rbinom(trials, 1, 0.5)
+# initialize all vectors
+Other    <- rep(NA, trials)
+Self     <- rep(NA, trials)
+feedback <- rep(NA, trials)
+V        <- rep(NA, trials)
 
-# Self - RL agent
-Self <-  rep(NA, trials)
-# Other  <- rep(NA, trials)
-# memory <- rep(NA,trials)
-# result <- rep(NA,trials)
-V <- rep(NA,trials)
-V[1] <- 0.5
-Self[1] <- rbinom(1, 1, V[1])
+# initializing with everything starting at 0.5
+Other[1]    <- rbinom(1, 1, 0.5)
+V[1]        <- 0.5
+Self[1]     <- rbinom(1, 1, V[1])
+feedback[1] <- as.integer(Self[1] == Other[1])
 
-for (t in 2:trials){
-  V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
-  # softmax
-  p <- 1/(1 + exp(-true_beta * (V[t] - 0.5)))
-  Self[t] <- rbinom(1, 1, p)
+
+for (t in 2:trials) {
+  Other[t] <- WSLSAgent_f(Other[t-1], feedback[t-1]) # WSLS agent starts
+  V[t]     <- V[t-1] + true_alpha * (Other[t-1] - V[t-1]) 
+  p        <- 1 / (1 + exp(-true_beta * (V[t] - 0.5)))
+  Self[t]  <- rbinom(1, 1, p) # probability of choosing 1
+  
+  feedback[t] <- as.integer(Self[t] == Other[t])
 }
+```
 
-# feedback
-feedback <- as.integer(Self == Other)
+
+```{r}
+# # simulate one agent with known params
+# # "true" values for later recovery
+# 
+# true_alpha <- 0.3
+# true_beta <- 2.0
+# 
+# # opponent - WSLS agent
+# Other    <- rep(NA, trials)
+# Other[1] <- rbinom(1, 1, 0.5)
+# for (t in 2:trials) {
+#   Other[t] <- WSLSAgent_f(Other[t-1], feedback[t-1])
+# }
+# 
+# # Self - RL agent
+# Self <-  rep(NA, trials)
+# # Other  <- rep(NA, trials)
+# # memory <- rep(NA,trials)
+# # result <- rep(NA,trials)
+# V <- rep(NA,trials)
+# V[1] <- 0.5
+# Self[1] <- rbinom(1, 1, V[1])
+# 
+# for (t in 2:trials){
+#   V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
+#   # softmax
+#   p <- 1/(1 + exp(-true_beta * (V[t] - 0.5)))
+#   Self[t] <- rbinom(1, 1, p)
+# }
+# 
+# # feedback
+# feedback <- as.integer(Self == Other)
 ```
 
 ```{r data-prep}
@@ -192,14 +225,16 @@ fit_RL <- mod_RL$sample(
 fit_RL$summary()
 
 # divergences
-fit_RL$diagnostic_summary
+fit_RL$diagnostic_summary()
+
+mcmc_trace(fit_RL$draws(), pars = c("alpha", "beta"))
 ```
 
 ```{r extract-draws}
 # converting posterior draws to tidy df
 draws_df <- fit_RL$draws(format = "df")
 
-glimpse(draws_df)
+#glimpse(draws_df)
 
 ```
 
@@ -216,136 +251,81 @@ To do:
 
 ## Prior-posterior update checks
 
-```{r}
-# Alpha
-ggplot(draws_df) +
-  geom_density(aes(alpha_prior),     fill = "red",  alpha = 0.3) +
-  geom_density(aes(alpha),           fill = "blue", alpha = 0.3) +
-  geom_vline(xintercept = true_alpha, linetype = "dashed") +  # true value
-  labs(
-    title = "Prior-posterior update: alpha (learning rate)",
-    subtitle = "Red = prior, Blue = posterior, dashed = true value",
-    x = "Alpha", y = "Density"
-  )
-
-# Beta
-ggplot(draws_df) +
-  geom_density(aes(beta_prior),     fill = "red",  alpha = 0.3) +
-  geom_density(aes(beta),           fill = "blue", alpha = 0.3) +
-  geom_vline(xintercept = true_beta, linetype = "dashed") +
-  labs(
-    title = "Prior-posterior update: beta (inverse temperature)",
-    subtitle = "Red = prior, Blue = posterior, dashed = true value",
-    x = "Beta", y = "Density"
-  )
-```
 
 
 ```{r}
-# RICCARDO
-
-# # alpha
-# ggplot(draws_df)+
-#   geom_density(aes(alpha_posterior), fill = "blue", alpha = 0.3) + 
-#   geom_density(aes(alpha_prior), fill = "red", alpha = 0.3) +
-#   geom_vline(xintercept = 0.8)+
-#   xlab("Rate") +
-#   ylab("Posterior Density")+
-#   theme_classic()
+# # RICCARDO
 # 
-# # beta
-# ggplot(draws_df) +
-#   geom_density(aes(beta_prior),     fill = "red",  alpha = 0.3) +
-#   geom_density(aes(beta),           fill = "blue", alpha = 0.3) +
-#   geom_vline(xintercept = true_beta, linetype = "dashed") +
-#   labs(
-#     title = "Prior-posterior update: beta (inverse temperature)",
-#     subtitle = "Red = prior, Blue = posterior, dashed = true value",
-#     x = "Beta", y = "Density"
-#   )
+# alpha
+ggplot(draws_df)+
+  geom_density(aes(alpha), fill = "blue", alpha = 0.3) + # alpha = posterior
+  geom_density(aes(alpha_prior), fill = "red", alpha = 0.3) +
+  geom_vline(xintercept = true_alpha)+
+  xlab("Rate") +
+  ylab("Posterior Density")+
+  theme_classic()
+
+ggplot(draws_df)+
+  geom_density(aes(beta), fill = "blue", alpha = 0.3) + # alpha = posterior
+  geom_density(aes(beta_prior), fill = "red", alpha = 0.3) +
+  geom_vline(xintercept = true_beta)+
+  xlab("Rate") +
+  ylab("Posterior Density")+
+  theme_classic()
 ```
 
 ## Prior predictive check
 
 ```{r}
-prior_pred_cols <- draws_df %>% 
-  select(starts_with("choice_prior_pred"))
 
-# Mean predicted choice per trial across draws
-prior_pred_mean <- colMeans(prior_pred_cols)
+prior_pred_sums <- draws_df %>% 
+  select(starts_with("choice_prior_pred")) %>% 
+  rowSums()
 
-ggplot(tibble(trial = 1:trials, pred = prior_pred_mean)) +
-  geom_line(aes(trial, pred)) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray") +
-  ylim(0, 1) +
-  labs(
-    title = "Prior predictive check: mean predicted choice per trial",
-    x = "Trial", y = "P(choice = 1)"
-  )
-```
-
-
-```{r}
 # RICCARDO
 
-# # prior predictive check
-# ggplot(draws_df) +
-#   geom_histogram(aes(prior_preds), color = "darkblue", fill = "blue",
-#                  alpha = 0.3, bins = 90) +
-#   geom_point(x = sum(data$choice), y = 0, color = "red", shape = 17, size = 5) +
-#   xlab("Predicted rifht hands out of 120 trials")+
-#   ylab("Posterior count")+
-#   theme_classic()
-# 
-# 
-# ggplot(draws_df) + # prior rate = inv_logit of Normal(0,3)
-#   geom_histogram(aes(prior_preds), color = "darkblue", fill = "blue",
-#                  alpha = 0.3) +
-#   xlab("Predicted right hands out of 120 trials")+
-#   ylab("Posterior count")+
-#   theme_classic()
-# 
-# # this is Riccardo's code, from here draws_df is missing, as well as a way to pull prior_preds from the model
+# prior predictive check
+ggplot() +
+  geom_histogram(aes(prior_pred_sums), color = "darkblue", fill = "blue",
+                 alpha = 0.3, bins = 90) +
+  geom_point(x = sum(Self), y = 0, color = "red", shape = 17, size = 5) +
+  xlab("Predicted right hands out of 120 trials")+
+  ylab("Count")+
+  theme_classic()
+
 ```
 
 
 ## Posterior predictive checks
 
-```{r}
-post_pred_cols <- draws_df %>% 
-  select(starts_with("choice_posterior_pred"))
-
-post_pred_mean <- colMeans(post_pred_cols)
-
-ggplot(tibble(trial = 1:trials,
-              posterior = post_pred_mean,
-              actual    = Self)) +
-  geom_line(aes(trial, actual),    color = "black", alpha = 0.4) +
-  geom_line(aes(trial, posterior), color = "blue",  alpha = 0.8) +
-  ylim(0, 1) +
-  labs(
-    title = "Posterior predictive check",
-    subtitle = "Black = actual choices, Blue = model predictions",
-    x = "Trial", y = "P(choice = 1)"
-  )
-```
-
 
 ```{r}
+
+# sum across trials for each draw — gives "how many heads predicted per draw"
+prior_pred_sums <- draws_df %>% 
+  select(starts_with("choice_prior_pred")) %>% 
+  rowSums()
+
+posterior_pred_sums <- draws_df %>% 
+  select(starts_with("choice_posterior_pred")) %>% 
+  rowSums()
+
 # RICCARDO
 
-# ggplot(draws_df)+
-#   geom_histogram(aes(alpha_prior_preds),
-#                  color = "lightblue", fill = "blue", 
-#                  alpha = 0.3, bins = 90) +
-#   geom_histogram(aes(alpha_posterior_preds),
-#                  color = "darkblue", fill = "blue", 
-#                  alpha = 0.3, bins = 90)+
-#   geom_point(x = sum(data$choice), y = 0, color = "red",
-#              shape = 17, size = 5) +
-#   xlab("Predicted heads out of 120 trials") +
-#   ylab("Density")+
-#   theme_classic()
+# alpha
+
+ggplot(draws_df)+
+  geom_histogram(aes(prior_pred_sums),
+                 color = "lightblue", fill = "blue",
+                 alpha = 0.3, bins = 90) +
+  geom_histogram(aes(posterior_pred_sums),
+                 color = "darkblue", fill = "blue",
+                 alpha = 0.3, bins = 90)+
+  geom_point(x = sum(Self), y = 0, color = "red",
+             shape = 17, size = 5) +
+  xlab("Predicted heads out of 120 trials") +
+  ylab("Density")+
+  theme_classic()
 
 ```
 
@@ -358,28 +338,36 @@ ggplot(tibble(trial = 1:trials,
 recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
   if (!is.null(seed)) set.seed(seed)
   
-  # simulating data from known params
-  V <- rep(NA, trials)
+  # initialising vectors
+  V <- rep(NA, trials) # p of choosing 1
   choice <- rep(NA, trials)
-  Other <- rbinom(trials, 1, 0.5)
+  Other <- rep(NA, trials)
+  feedback <- rep(NA, trials)
+  
+  # first trial
+  Other[1] <- rbinom(1, 1, 0.5)
   V[1] <- 0.5
   choice[1] <- rbinom(1, 1, V[1])
-  
+  feedback[1] <- as.integer(choice[1]==Other[1]) # should there be weights for this? This is just T/F
+
+# rest of trials
   for (t in 2:trials) {
-    V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
-    p <- 1 / (1 + exp(-true_beta * (V[t] - 0.5)))
-    choice[t] <- rbinom(1, 1, p)
+    Other[t]       <- WSLSAgent_f(Other[t-1], feedback[t-1])
+    V[t]           <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
+    p              <- 1 / (1 + exp(-true_beta * (V[t] - 0.5)))
+    choice[t]      <- rbinom(1, 1, p)
+    feedback[t]<- as.integer(choice[t] == Other[t])
   }
   
-  feedback <- as.integer(choice == Other)
+  feedback <- as.integer(choice[t] == Other[t])
   
   # Fit model
   stan_data <- list(
     n = trials,
-    players = 1L, 
+    players = 1L, # 1 as integer
     choice = choice,
     feedback = feedback,
-    prior_alpha_m = 0, prior_alpha_sd = 1,
+    prior_alpha_m = 0, prior_alpha_sd = 1, # both normal distributions
     prior_beta_m = 0, prior_beta_sd = 1
   )
   
@@ -410,21 +398,22 @@ recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
   )
 }
 
-# grid of param combinations to recover
-recovery_grid <- expand_grid(
-  true_alpha = c(0.1, 0.3, 0.5, 0.7, 0.9),
-  true_beta = c(0.5, 1.0, 2.0, 4.0)
-)
-
-# running recovery in parallel
-recovery_results <- #future_
-pmap_dfr(
-  recovery_grid,
-  ~ recover_params(..1, ..2, trials = 120),
-  .options = furrr_options(seed = TRUE)
-)
-  
+# # grid of param combinations to recover
+# recovery_grid <- expand_grid(
+#   true_alpha = c(0.1, 0.3, 0.5, 0.7, 0.9),
+#   true_beta = c(0.5, 1.0, 2.0, 4.0)
+# )
+# 
+# # running recovery in parallel
+# recovery_results <- #future_
+# pmap_dfr(
+#   recovery_grid,
+#   ~ recover_params(..1, ..2, trials = 500),
+#   .options = furrr_options(seed = TRUE)
+# )
+#   
 ```
+
 
 ```{r}
 # plotting param recov results
