@@ -1,24 +1,4 @@
-In the assignment you need to build and validate a cognitive model of matching pennies behavior using Stan. As an outcome of this you will have to produce a text (+ plots) document (linked to a github repo) in which you:
-  
-  describe the model you are working on (N.B. it doesn't need to be one from Assignment 1)
-   - showcase a commented version of the stan model (what does each line do?)
-   - discuss model quality of the model (predictive prior and posterior checks, prior-posterior update checks, etc.)
-   - describe a process of parameter recovery (why are you doing it?, how are you doing it?)
-   - discuss the results: can you recover the parameter values? How many trials should be used at least to properly recover the parameters? What’s the role of priors? Add relevant plot(s).
 
-N.B. to pass it's enough to use the single agent model, but if you want to learn more (at the cost of more time investment), you could
-                                         
-(optional) Build the multilevel version of your model and run the parameter recovery on it.
-(optional) Analyze an empirical dataset
-                                         
-                                         Empirical datasets:
-                                           
-Guide to the data: https://www.dropbox.com/s/m1u5roo4z0f2emr/readme.txt?dl=0
-Non-human primates dataset: https://www.dropbox.com/s/8fj7k5jk8mn4j63/mp_primates.csv?dl=0
-Human primates dataset (former CogSci'ers):
- https://www.dropbox.com/s/9z6hcg9b4yhzgbu/mp_students.csv?dl=0
- https://www.dropbox.com/s/r2ok23vjewyelaz/mp_students_22.csv?dl=0
-Clinical dataset (schizophrenia and controls): https://www.dropbox.com/s/dxj9f8txg1yax68/mp_schizophrenia.csv?dl=0
 
 ## Packages 
 ```{r}
@@ -44,7 +24,6 @@ theme_set(theme_classic())
 # Simulating data
 
 ```{r simulating data}
-# Trials and agents from Yosuf's code
 
 set.seed(123)
 trials <-  120
@@ -90,60 +69,8 @@ for (t in 2:trials) {
 
 ```
 
-```{r}
 
-```
-
-
-```{r}
-# # simulate one agent with known params
-# # "true" values for later recovery
-# 
-# true_alpha <- 0.3
-# true_beta <- 2.0
-# 
-# # opponent - WSLS agent
-# Other    <- rep(NA, trials)
-# Other[1] <- rbinom(1, 1, 0.5)
-# for (t in 2:trials) {
-#   Other[t] <- WSLSAgent_f(Other[t-1], feedback[t-1])
-# }
-# 
-# # Self - RL agent
-# Self <-  rep(NA, trials)
-# # Other  <- rep(NA, trials)
-# # memory <- rep(NA,trials)
-# # result <- rep(NA,trials)
-# V <- rep(NA,trials)
-# V[1] <- 0.5
-# Self[1] <- rbinom(1, 1, V[1])
-# 
-# for (t in 2:trials){
-#   V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
-#   # softmax
-#   p <- 1/(1 + exp(-true_beta * (V[t] - 0.5)))
-#   Self[t] <- rbinom(1, 1, p)
-# }
-# 
-# # feedback
-# feedback <- as.integer(Self == Other)
-```
-
-```{r data-prep}
-# preparing data for STAN
-data_for_stan <- list(
-  n = trials,
-  players = 1L, 
-  choice = Self, # agent's choices - 0 or 1
-  feedback = feedback,
-  prior_alpha_m = 0,
-  prior_alpha_sd = 1,
-  prior_beta_m = 0, 
-  prior_beta_sd = 1
-)
-```
-
-```{r}
+```{r prepare-data}
 data_for_stan <- list(
   n = trials,
   Self  = Self,
@@ -155,17 +82,6 @@ data_for_stan <- list(
 
 
 # STAN model
-
-*for now this is all from the slides*
-```{r}
-stan_file_RL <- here("Assignment_2",  "model_outline.stan")
-
-mod_RL <- cmdstan_model(
-  stan_file_RL,
-  cpp_options = list(stan_threads = FALSE),
-  stanc_options = list("O1")
-  )
-```
 
 ```{r}
 stan_file_RL <- here("Assignment_2",  "RL.stan")
@@ -208,34 +124,17 @@ fit_RL$summary()
 fit_RL$diagnostic_summary()
 
 mcmc_trace(fit_RL$draws(), pars = c("alpha", "beta"))
-```
 
-```{r extract-draws}
-# converting posterior draws to tidy df
 draws_df <- fit_RL$draws(format = "df")
 
-#glimpse(draws_df)
-
 ```
-
-
-## Generating prior and posterior predictions
-- priors
-- simulations from the prior
-- simulations from the posterior
-
-To do: 
-- separate for alpha and beta once the structure is more clarified
-- find a way to feed more educated guesses to the model
 
 
 ## Prior-posterior update checks
 
 
-
 ```{r}
-# # RICCARDO
-# 
+ 
 # alpha
 ggplot(draws_df)+
   geom_density(aes(alpha), fill = "blue", alpha = 0.3) + 
@@ -270,7 +169,6 @@ prior_pred_sums <- draws_df %>%
   select(starts_with("choice_prior_pred")) %>% 
   rowSums()
 
-# RICCARDO
 
 # prior predictive check
 ggplot() +
@@ -322,7 +220,6 @@ posterior_pred_sums <- draws_df %>%
   select(starts_with("choice_posterior_pred")) %>% 
   rowSums()
 
-# RICCARDO
 
 # alpha
 
@@ -344,87 +241,6 @@ ggplot(draws_df)+
 
 # Parameter recovery
 
-```{r}
-# recovery fun for a single alpha-beta pair
-
-recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
-  if (!is.null(seed)) set.seed(seed)
-  
-  # initialising vectors
-  V <- rep(NA, trials) # p of choosing 1
-  choice <- rep(NA, trials)
-  Other <- rep(NA, trials)
-  feedback <- rep(NA, trials)
-  
-  # first trial
-  Other[1] <- rbinom(1, 1, 0.5)
-  V[1] <- 0.5
-  choice[1] <- rbinom(1, 1, V[1])
-  feedback[1] <- as.integer(choice[1]==Other[1]) # should there be weights for this? This is just T/F
-
-# rest of trials
-  for (t in 2:trials) {
-    Other[t]       <- WSLSAgent_f(Other[t-1], feedback[t-1])
-    V[t]           <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
-    p              <- 1 / (1 + exp(-true_beta * (V[t] - 0.5)))
-    choice[t]      <- rbinom(1, 1, p)
-    feedback[t]<- as.integer(choice[t] == Other[t])
-  }
-  
-  feedback <- as.integer(choice[t] == Other[t])
-  
-  # Fit model
-  stan_data <- list(
-    n = trials,
-    players = 1L, # 1 as integer
-    choice = choice,
-    feedback = feedback,
-    prior_alpha_m = 0, prior_alpha_sd = 1, # both normal distributions
-    prior_beta_m = 0, prior_beta_sd = 1
-  )
-  
-  fit <- mod_RL$sample(
-    data = stan_data,
-    seed = 123,
-    chains = 4,
-    parallel_chains = 4,
-    iter_warmup = 1000,
-    iter_sampling = 2000,
-    refresh = 0, # silent for recovery loop
-    adapt_delta = 0.99
-  )
-  
-  # get posterior means and 90% credible intervals
-  summ <- fit$summary(c("alpha", "beta"))
-  
-  tibble(
-    true_alpha = true_alpha,
-    true_beta = true_beta,
-    est_alpha = summ$mean[summ$variable == "alpha"],
-    est_beta = summ$mean[summ$variable == "beta"],
-    lo_alpha = summ$q5[summ$variable == "alpha"],
-    hi_alpha = summ$q95[summ$variable == "alpha"],
-    lo_beta = summ$q5[summ$variable == "beta"],
-    hi_beta = summ$q95[summ$variable == "beta"],
-    
-  )
-}
-
-# grid of param combinations to recover
-recovery_grid <- expand_grid(
-  true_alpha = c(0.1, 0.3, 0.5, 0.7, 0.9),
-  true_beta = c(0.5, 1.0, 2.0, 4.0)
-)
-
-# running recovery in parallel
-recovery_results <- #future_
-pmap_dfr(
-  recovery_grid,
-  ~ recover_params(..1, ..2, trials = 500),
-  .options = furrr_options(seed = TRUE)
-)
-
-```
 
 ```{r}
 recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
@@ -485,49 +301,6 @@ recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
 }
 ```
 
-```{r}
-
-recovery_grid <- expand_grid(
-  true_alpha = c(0.1, 0.3, 0.5, 0.7, 0.9),
-  true_beta = c(0.5, 1.0, 2.0, 4.0)
-)
-
-recovery_results <- pmap_dfr(
-  recovery_grid,
-  ~ recover_params(..1, ..2, trials = 500),
-  .options = furrr_options(seed = TRUE)
-)
-
-
-```
-
-
-
-
-
-```{r}
-# plotting param recov results
-
-# alpha 
-ggplot(recovery_results, aes(true_alpha, est_alpha)) +
-  geom_pointrange(aes(ymin = lo_alpha, ymax = hi_alpha), alpha = 0.6) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
-  labs(
-    title = "Parameter recovery: alpha",
-    subtitle = "Points = posterior mean, bars = 90% CI, dashed = perfect recovery",
-    x = "True alpha", y = "Estimated alpha"
-  )
-
-# beta
-ggplot(recovery_results, aes(true_beta, est_beta)) +
-  geom_pointrange(aes(ymin = lo_beta, ymax = hi_beta), alpha = 0.6) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
-  labs(
-    title = "Parameter recovery: beta",
-    subtitle = "Points = posterior mean, bars = 90% CI, dashed = perfect recovery",
-    x = "True beta", y = "Estimated beta"
-  )
-```
 
 
 ```{r}
@@ -545,8 +318,6 @@ recovery_results <- pmap_dfr(
   recovery_grid,
   ~ recover_params(..2, ..3, trials = ..1)
 )
-
-
 
 ```
 
