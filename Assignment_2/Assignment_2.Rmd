@@ -238,20 +238,27 @@ To do:
 # 
 # alpha
 ggplot(draws_df)+
-  geom_density(aes(alpha), fill = "blue", alpha = 0.3) + # alpha = posterior
+  geom_density(aes(alpha), fill = "blue", alpha = 0.3) + 
   geom_density(aes(alpha_prior), fill = "red", alpha = 0.3) +
-  geom_vline(xintercept = true_alpha)+
-  xlab("Rate") +
-  ylab("Posterior Density")+
+  geom_vline(xintercept = true_alpha, color='red')+
+  labs(
+    title = "Prior-Posterior update for alpha",
+    subtitle = "red = prior, blue = posterior, vertical line = True alpha",
+    x = "alpha", y = "Density"
+  ) +
   theme_classic()
 
+# beta 
 ggplot(draws_df)+
-  geom_density(aes(beta), fill = "blue", alpha = 0.3) + # alpha = posterior
+  geom_density(aes(beta), fill = "blue", alpha = 0.3) + 
   geom_density(aes(beta_prior), fill = "red", alpha = 0.3) +
-  geom_vline(xintercept = true_beta)+
-  scale_x_continuous(limits = c(0,10))
-  xlab("Rate") +
-  ylab("Posterior Density")+
+  geom_vline(xintercept = true_beta, color='red')+
+  scale_x_continuous(limits = c(0,10))+
+  labs(
+    title = "Prior-Posterior update for beta",
+    subtitle = "red = prior, blue = posterior, vertical line = True beta",
+    x = "beta", y = "Density"
+  ) +
   theme_classic()
 ```
 
@@ -291,12 +298,10 @@ ggplot() +
                  fill = "blue",
                  alpha = 0.3,
                  bins = 90) +
-  geom_point(aes(x = sum(Self), y = 0),
-             color = "red",
-             shape = 17,
-             size = 5) +
-  xlab("Predicted right hands out of 120 trials") +
-  ylab("Count") +
+  labs(
+    title = "Posterior predictive check",
+    x = "Predicted right hands out of 120 trials", y = "Count"
+  ) +
   theme_classic()
 
 
@@ -563,6 +568,35 @@ recovery_results %>%
 
 
 
+```{r}
+
+ggplot(recovery_results, aes(true_alpha, est_alpha)) +
+  geom_pointrange(aes(ymin = lo_alpha, ymax = hi_alpha), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, 
+              linetype = "dashed", color = "red") +
+  facet_wrap(~ trials, nrow = 2) +
+  labs(
+    title = "Parameter recovery: α (learning rate)",
+    subtitle = "Each panel shows a different number of trials\nPoints = posterior mean, bars = 90% CI, dashed = perfect recovery",
+    x = "True α",
+    y = "Estimated α"
+  ) +
+  theme_classic()
+
+ggplot(recovery_results, aes(true_beta, est_beta)) +
+  geom_pointrange(aes(ymin = lo_beta, ymax = hi_beta), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, 
+              linetype = "dashed", color = "red") +
+  facet_wrap(~ trials, nrow = 2) +
+  labs(
+    title = "Parameter recovery: β (inverse temperature)",
+    subtitle = "Each panel shows a different number of trials\nPoints = posterior mean, bars = 90% CI, dashed = perfect recovery",
+    x = "True β",
+    y = "Estimated β"
+  ) +
+  theme_classic()
+
+```
 
 
 

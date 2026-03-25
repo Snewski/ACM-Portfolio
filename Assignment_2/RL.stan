@@ -13,7 +13,7 @@ transformed parameters {
   real<lower=0, upper=1> alpha = inv_logit(alpha_raw);
   real<lower=0>   beta  = exp(beta_raw);
 
-  array[n] real<lower=0, upper=1> V;       // latent value trajectory
+  array[n] real<lower=0, upper=1> V;       // expected values
   array[n] real<lower=0, upper=1> p;       // choice probabilities
 
   // initial values
@@ -44,8 +44,8 @@ generated quantities {
   real<lower=0, upper=1> alpha_prior = inv_logit(normal_rng(0, 1));
   real<lower=0>   beta_prior  = exp(normal_rng(0, 1));
 
-  
-  array[n] int<lower=0, upper=1> Self_rep;   // posterior predictive
+  // posterior predictive
+  array[n] int<lower=0, upper=1> Self_rep;   
 
   for (t in 1:n) {
     Self_rep[t] = bernoulli_rng(p[t]);
