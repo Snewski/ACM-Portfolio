@@ -1,0 +1,232 @@
+---
+title: "ACM Assignment 3"
+author: "Sara Szabo"
+date: "2026-04-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Task description
+
+In assignment 3 you have to analyze real world data using Bayesian models of cognition. You can apply the models we discussed during the lectures, but you need to adjust them to reflect the specific setup.
+
+The data comes from the social conformity experiment (<https://pubmed.ncbi.nlm.nih.gov/30700729/>), where cogsci students (in dataset 1) and schizophrenia patients + controls (dataset 2) combine their own intuition of trustworthiness of given faces to social information.
+
+Your task is to
+
+implement a simulation of the task
+implement 2 different agents playing the task in R and the relative Stan inferential models (WBA, the other is of your choice, e.g. SBA, PBA, or another of your liking).
+design 3-5 scenarios(i. e. different weights - one relying on social information, one not caring, some in between) that distinguish the agent and visualize the behaviors 
+simulate data from the models to assess whether the models can be fit and the true model can be inferred via model comparison
+    has the sampling worked? divergences, etc
+    model recovery on the 3-5 scenarios
+    [predictive checks; prior posterior updates; prior sensitivity, SBC and parameter recovery are optional]
+    [multilevel is optional]
+fit the 2 models to one empirical dataset (if you choose to leave multilevel out, you are fitting a no pooling model, each participant on its own]
+    data exploration
+    divergences, etc
+    predictive checks
+    prior posterior updates
+    [prior/likelihood sensitivity and multilevel are optional]
+    model comparison
+report (v minimal description of research question, v minimal description of data, description of models, model quality checks, report of results, both of model comparison and of how the parameter values look like)
+
+```{r}
+# Packages
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future        # Future backend
+)
+
+# parallel setup
+n_cores <- parallel::detectCores() -2
+plan(multisession, workers = n_cores)
+
+#default ggplot theme
+theme_set(theme_classic())
+```
+
+
+```{r}
+exp_data <- read_csv("assignment3_data.csv") # data supplied by Riccardo
+```
+# Simulating task
+
+
+```{r}
+set.seed(123)
+
+n_agents <- 100 
+n_trials <- 10 
+rating_scale <- 8 # generate quantity between 1 and 8
+alpha_0 <- rep(0.5, rating_scale) # Jeffreys prior
+ 
+true_values <- sample(1:rating_scale, n_trials, replace = TRUE) # only here for simulation's sake
+group_values <- sample(1:rating_scale, n_trials, replace = TRUE) # second source of information
+
+# sampler function - draws 1 rating given a Dirichlet posterior
+
+draw_rating <- function(alpha_post){ 
+  theta <- rgamma(length(alpha_post), shape = alpha_post, rate = 1)
+  theta <- theta / sum(theta)
+  sample(seq_along(alpha_post), size = 1, prob = theta)
+}
+
+one_agent_one_trial <- function(id, true_value, group_value, alpha_0, rating_scale, w = 1) {
+  
+  # drawing the agent's own initial rating
+  init_counts <- rep(0, rating_scale)
+  init_counts[true_value] <- 1
+  
+  # agent meets social input
+  social_counts <- rep(0, rating_scale)
+  social_counts[group_value] <- 1
+  
+  rating_1 <- draw_rating(alpha_0 + init_counts)
+  alpha_post <- alpha_0 + init_counts + w * social_counts # weight is fixed at 1
+  rating_2 <- draw_rating(alpha_post)
+  
+  tibble(
+    agent_id = id,
+    rating_1 = rating_1,
+    social_input = group_value,      
+    rating_2 = rating_2,            
+    weight = w
+  )
+}
+
+# multiple agents & multiple trials
+
+simulate_SBA <- function(n_agents, n_trials, true_values, group_values, alpha_0, rating_scale, w =1){ # multiple agents & multiple trials
+  map_dfr(1:n_trials, function(trial){
+  map_dfr(1:n_agents, one_agent_one_trial,
+          true_value = true_values[trial],
+          group_value = group_values[trial],
+          alpha_0 = alpha_0,
+          rating_scale = rating_scale,
+          w = 1) %>% 
+      mutate(trial = trial)
+  })
+}
+
+sba_data <- simulate_SBA(
+  n_agents = n_agents,
+  n_trials = n_trials, 
+  true_values = true_values,
+  group_values = group_values,
+  alpha_0 = alpha_0,
+  rating_scale = rating_scale, 
+  w = 1
+)
+
+stan_data <- list(
+  N_total = nrow(sba_data),
+  rating_scale = rating_scale,
+  rating_1 = sba_data$rating_1,
+  group_rating = sba_data$social_input,
+  y = sba_data$rating_2
+)
+
+
+# Introducing WBA
+
+# defining multiple scenarios
+scenarios <- list(
+  "low conformity"     = 0.25,
+  "moderate conformity"           = 0.50,
+  "equal to SBA"       = 1.00,
+  "high conformity"    = 2.00,
+  "very high conformity"= 4.00
+)
+
+# generates a single trial output for both agents
+both_agents_single_trial <- function(id, true_value, group_value, alpha_0, rating_scale, w) {
+
+  init_counts               <- rep(0, rating_scale)
+  init_counts[true_value]  <- 1
+
+  social_counts                     <- rep(0, rating_scale)
+  social_counts[group_value] <- 1
+
+  rating_1 <- draw_rating(alpha_0 + init_counts)
+
+  # SBA - w = 1 fixed
+  alpha_sba  <- alpha_0 + init_counts + 1 * social_counts
+  final_sba  <- draw_rating(alpha_sba)
+
+  # WBA - w from scenarios
+  alpha_wba  <- alpha_0 + init_counts + w * social_counts
+  final_wba  <- draw_rating(alpha_wba)
+
+  tibble( # for different values stored, make changes here
+    agent_id = id,
+    rating_1 = rating_1,
+    social_input = group_value,
+    final_sba  = final_sba,
+    change_sba = final_sba - rating_1,
+    final_wba = final_wba,
+    change_wba = final_wba - rating_1,
+    weight       = w
+  )
+}
+
+
+
+# different WBA scenarios + SBA data
+both_agents_data <- imap_dfr(scenarios, function(w, label) {
+  map_dfr(1:n_trials, function(trial){
+    map_dfr(1:n_agents, both_agents_single_trial,
+            true_value = true_values[trial],
+            group_value = group_values[trial],
+            alpha_0 = alpha_0,
+            rating_scale = rating_scale,
+            w = w) %>% 
+      mutate(trial = trial)
+  }) %>% 
+    mutate(scenario = label)
+})
+
+# generating stan-friendly format (1 list per scenario)
+both_agents_stan_data <- imap(scenarios, function(w, label) { # for different values stored, make changes here
+  results <- both_agents_data %>% filter(scenario == label)
+  list(
+    N_total = nrow(results),
+    rating_scale = rating_scale,
+    rating_1 = results$rating_1,
+    group_rating = results$social_input,
+    y_sba = results$final_sba, # final rating by SBA
+    y_wba = results$final_wba, # final raring by WBA
+    change_sba = results$change_sba,
+    change_wba = results$change_wba
+  )
+})
+
+# summary
+both_agents_data %>%
+  group_by(scenario) %>%
+  summarise(
+    mean_initial = mean(rating_1),
+    mean_sba = mean(final_sba),
+    mean_wba = mean(final_wba),
+    change_sba = mean(final_sba - rating_1),
+    change_wba = mean(final_wba - rating_1)
+  ) %>%
+  print()
+
+
+```
+
+
+# Agents & Stan models
+
+# Simulate data from models
+
+# Fitting models to empirical dataset
