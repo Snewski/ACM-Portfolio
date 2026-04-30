@@ -58,16 +58,14 @@ theme_set(theme_classic())
 
 
 ```{r}
-exp_data <- read_csv("assignment3_data.csv") # data supplied by Riccardo
+exp_data <- read_csv("assignment3_data.csv") # CogSci students data
 ```
 
 ```{r}
 # Create the full factorial design
 evidence_combinations <- expand_grid(
-  rating_1  = 0:7,   # Direct evidence: 0-8 blue marbles out of 8
-  social  = 0:7,   # Social evidence: encoded as 0-3 (pseudo-marbles)
- # total1 = 8,     # Fixed sample size for direct evidence
- # total2 = 3      # Fixed "sample size" for social evidence
+  rating_1  = 0:7,
+  social  = 0:7,   
 )
 
 # This gives us 9 × 4 = 36 unique evidence combinations
@@ -101,11 +99,11 @@ betaBinomialTrust <- function(alpha_prior = 0.5, beta_prior = 0.5,
 # Function to generate decisions from a simulated agent
 generate_agent_decisions_trust <- function(weight_direct, weight_social,
                                             evidence_df, n_samples = 5) {
-  evidence_df |>
-    slice(rep(seq_len(n()), each = n_samples)) |>
-    group_by(rating_1, social) |>
-    mutate(sample_id = seq_len(n())) |>
-    ungroup() |>
+  evidence_df  %>% 
+    slice(rep(seq_len(n()), each = n_samples)) %>%
+    group_by(rating_1, social) %>%
+    mutate(sample_id = seq_len(n())) %>%
+    ungroup() %>%
     pmap_dfr(function(rating_1, social, sample_id) {
       result <- betaBinomialTrust(
         0.5, 0.5,
@@ -149,6 +147,8 @@ prepare_stan_data_trust <- function(df) {
 
 
 ```{r}
+# Simulation
+
 # Scenario: agent rates trustworthiness 5/8, group rates 7/8
 # On 0-7 scale: rating_1 = 4, social = 6
 rating_1_demo <- 4
@@ -162,8 +162,6 @@ n_sims     <- 10000
 n_ratings  <- 20
 expected_rate_demo <- alpha_demo / (alpha_demo + beta_demo)
 
-# ── Step 1: Simulate both models ───────────────────────────────────────────────
-
 # Model A: Beta-Binomial (uncertainty in theta propagates)
 # Draw theta from Beta, then draw ratings based on that theta
 theta_draws <- rbeta(n_sims, alpha_demo, beta_demo)
@@ -172,10 +170,10 @@ bb_draws    <- rbinom(n_sims, size = 7, prob = theta_draws)  # single rating dra
 # Model B: Standard Binomial (fixed belief, no uncertainty in theta)
 binom_draws <- rbinom(n_sims, size = 7, prob = expected_rate_demo)
 
-# ── Step 2: Visualization ──────────────────────────────────────────────────────
+# Visualization
 
 # Plot 1: uncertainty in theta
-p_theta <- tibble(theta = theta_draws) |>
+p_theta <- tibble(theta = theta_draws) %>%
   ggplot(aes(x = theta)) +
   geom_density(fill = "#4575b4", alpha = 0.5, color = "transparent") +
   geom_vline(xintercept = expected_rate_demo,
@@ -190,12 +188,11 @@ p_theta <- tibble(theta = theta_draws) |>
     y = "Density"
   )
 
-# Plot 2: outcome comparison showing overdispersion
-# Shift draws to 1-8 scale for interpretability
+
 plot_data <- tibble(
   `Beta-Binomial (Uncertain θ)` = bb_draws + 1,
   `Standard Binomial (Fixed θ)` = binom_draws + 1
-) |>
+) %>%
   pivot_longer(cols = everything(), names_to = "Model", values_to = "Rating")
 
 p_spread <- ggplot(plot_data, aes(x = Rating, fill = Model)) +
@@ -213,7 +210,8 @@ p_spread <- ggplot(plot_data, aes(x = Rating, fill = Model)) +
   ) +
   theme(legend.position = "top")
 
-# ── Combine panels ─────────────────────────────────────────────────────────────
+# Combining panels
+
 p_theta + p_spread +
   plot_annotation(
     title    = "How uncertainty propagates: Beta-Binomial vs Binomial",
@@ -231,7 +229,7 @@ evidence_combinations_trust <- expand.grid(
 )
 
 # Calculate SBA predictions for all evidence combinations
-sim_data_trust <- evidence_combinations_trust |>
+sim_data_trust <- evidence_combinations_trust %>%
   pmap_dfr(function(rating_1, social) {
     result <- betaBinomialTrust(0.5, 0.5,
                                 rating_1 = rating_1,
@@ -243,7 +241,7 @@ sim_data_trust <- evidence_combinations_trust |>
       ci_lower      = result$ci_lower,
       ci_upper      = result$ci_upper
     )
-  }) |>
+  }) %>%
   mutate(
     social_evidence = factor(
       social, levels = 0:7,
@@ -294,7 +292,7 @@ N_predict <- 10
 overdispersion_data_trust <- expand_grid(
   rating_1 = 0:7,
   social   = 0:7
-) |>
+) %>%
   mutate(
     alpha_p   = 0.5 + rating_1 + social,
     beta_p    = 0.5 + (7 - rating_1) + (7 - social),
@@ -354,13 +352,13 @@ agents <- tibble(
 )
 
 # Generate simulated data for all three agent types
-simulation_results_trust <- agents |>
+simulation_results_trust <- agents %>%
   pmap_dfr(function(agent_type, weight_direct, weight_social) {
     generate_agent_decisions_trust(weight_direct, weight_social,
                                    evidence_combinations_trust,
-                                   n_samples = 5) |>
+                                   n_samples = 5) %>%
       mutate(agent_type = agent_type)
-  }) |>
+  }) %>%
   mutate(
     social_evidence = factor(
       social, levels = 0:7,
@@ -376,8 +374,8 @@ simulation_results_trust <- agents |>
   )
 
 # Summarize for plotting
-plot_summary_trust <- simulation_results_trust |>
-  group_by(agent_type, rating_1, social_evidence) |>
+plot_summary_trust <- simulation_results_trust %>%
+  group_by(agent_type, rating_1, social_evidence) %>%
   summarise(
     theoretical_p = mean(expected_rate),
     empirical_p   = mean(choice / 7),   # rescale 0-7 to 0-1 for comparability
@@ -580,7 +578,7 @@ dir.create(here::here("simmodels"), showWarnings = FALSE)
 fit_sba_paths <- here::here(
   "simmodels",
   paste0("sba_trust_", names(stan_data_wba), ".rds")
-) |> set_names(names(stan_data_wba))
+) %>% set_names(names(stan_data_wba))
 
 regenerate_simulations <- TRUE
 
@@ -607,7 +605,7 @@ if (regenerate_simulations || !all(file.exists(fit_sba_paths))) {
 fit_wba_paths <- here::here(
   "simmodels",
   paste0("wba_trust_", names(stan_data_wba), ".rds")
-) |> set_names(names(stan_data_wba))
+) %>% set_names(names(stan_data_wba))
 
 if (regenerate_simulations || !all(file.exists(fit_wba_paths))) {
   seeds <- set_names(101:103, names(stan_data_wba))
@@ -642,34 +640,34 @@ extract_predictive_data_trust <- function(fit, stan_data, scenario_name,
     choice   = stan_data$choice
   )
 
-  pred_samples <- posterior::as_draws_df(fit$draws(target_var)) |>
-    dplyr::select(-.chain, -.iteration) |>
+  pred_samples <- posterior::as_draws_df(fit$draws(target_var)) %>%
+    dplyr::select(-.chain, -.iteration) %>%
     tidyr::pivot_longer(
       cols      = dplyr::starts_with(target_var),
       names_to  = "obs_id",
       values_to = "pred"
-    ) |>
+    ) %>%
     dplyr::mutate(obs_id = readr::parse_number(obs_id))
 
-  obs_summary <- obs_df |>
-    dplyr::group_by(rating_1, social) |>
+  obs_summary <- obs_df %>%
+    dplyr::group_by(rating_1, social) %>%
     dplyr::summarise(
       p_obs = mean(choice / 7),   # rescale 0-7 to 0-1 for comparability
       .groups = "drop"
     )
 
-  pred_summary <- pred_samples |>
-    dplyr::left_join(obs_df, by = "obs_id") |>
-    dplyr::group_by(.draw, rating_1, social) |>
-    dplyr::summarise(p_draw = mean(pred / 7), .groups = "drop") |>
-    dplyr::group_by(rating_1, social) |>
+  pred_summary <- pred_samples %>%
+    dplyr::left_join(obs_df, by = "obs_id") %>%
+    dplyr::group_by(.draw, rating_1, social) %>%
+    dplyr::summarise(p_draw = mean(pred / 7), .groups = "drop") %>%
+    dplyr::group_by(rating_1, social) %>%
     dplyr::summarise(
       p_pred = median(p_draw),
       lower  = quantile(p_draw, 0.025),
       upper  = quantile(p_draw, 0.975),
       .groups = "drop"
-    ) |>
-    dplyr::left_join(obs_summary, by = c("rating_1", "social")) |>
+    ) %>%
+    dplyr::left_join(obs_summary, by = c("rating_1", "social")) %>%
     dplyr::mutate(
       social_evidence = factor(
         social, levels = 0:7,
@@ -747,11 +745,11 @@ if (regenerate_simulations || !file.exists(here::here("simmodels/model_recovery_
     tibble(sim_id = 1:n_sims, true_model = "SBA", wd = 1.0, ws = 1.0),
     tibble(sim_id = 1:n_sims, true_model = "WBA",
            rho   = rbeta(n_sims, 2, 2),
-           kappa = rlnorm(n_sims, log(2), 0.5)) |>
+           kappa = rlnorm(n_sims, log(2), 0.5)) %>%
       mutate(wd = rho * kappa, ws = (1 - rho) * kappa)
   )
 
-  recovery_data <- sim_grid |>
+  recovery_data <- sim_grid %>%
     mutate(
       agent_data = pmap(list(wd, ws), function(wd, ws) {
         generate_agent_decisions_trust(wd, ws,
@@ -830,7 +828,7 @@ results_list[[i]] <- tibble(
 }
 
 # ── Visualize model recovery ───────────────────────────────────────────────────
-recovery_results |>
+recovery_results %>%
   ggplot(aes(x = true_model, y = elpd_diff, fill = true_model)) +
   geom_boxplot(alpha = 0.7) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
