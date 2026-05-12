@@ -1,0 +1,302 @@
+---
+title: "Assignment_4"
+output: html_document
+---
+
+
+
+```{r}
+
+# All 32 possible 5‑dimensional binary stimuli
+stimuli <- expand.grid(
+  spots = 0:1,
+  legs = 0:1,
+  eyes = 0:1,
+  arms = 0:1,
+  colour_green = 0:1
+)
+
+stimuli$stim_id <- 1:nrow(stimuli)
+# Association between feature and category for the first session
+stimuli$danger_true <- with(stimuli, ifelse(spots == 1 & eyes == 1, 1, 0))
+#stimuli$nutrition_true <- with(stimuli, ifelse(arms == 1, 1, 0))
+
+# randomizing the order of 3 blocks.
+
+set.seed(4)  # reproducible stuff
+
+n_blocks <- 3 # 3 reps of all stimuli
+
+data <- do.call(
+  rbind,
+  lapply(1:n_blocks, function(b) {
+    block <- stimuli[sample(1:32), ]
+    block$block <- b
+    block$trial_in_block <- 1:32
+    block
+  })
+)
+
+# Add trial_within_subject (overall trial number across all blocks)
+#data$trial_within_subject <- 1:nrow(data)
+
+
+
+```
+
+
+```{r}
+
+distance <- function(vect1, vect2, w) {
+  sum(w * abs(vect1 - vect2))
+}
+
+similarity <- function(dist_val, c) {
+  exp(-c * dist_val)
+}
+```
+
+
+```{r}
+# Generative GCM model function.
+gcm_simulate <- function(w,            # attention weights (sums to 1)
+                         c,            # sensitivity (natural scale, strictly positive)
+                         bias,         # response bias towards category 1
+                         obs,          # matrix of stimulus features (trials x features)
+                         cat_feedback, # true category labels (0 or 1)
+                         quiet = TRUE) {
+  ntrials   <- nrow(obs)
+  nfeatures <- ncol(obs)
+
+  prob_cat1    <- numeric(ntrials)
+  sim_response <- numeric(ntrials)
+
+  memory_obs <- matrix(NA_real_, nrow = 0, ncol = nfeatures)
+  memory_cat <- numeric(0)
+
+  for (i in seq_len(ntrials)) {
+    if (!quiet && i %% 20 == 0) cat("Simulating trial:", i, "\n")
+
+    current_stim <- as.numeric(obs[i, ])
+    n_mem        <- nrow(memory_obs)
+    has_cat0     <- any(memory_cat == 0)
+    has_cat1     <- any(memory_cat == 1)
+
+    if (n_mem == 0 || !has_cat0 || !has_cat1) {
+      prob_cat1[i] <- bias
+    } else {
+      sims <- vapply(seq_len(n_mem), function(e) {
+        similarity(distance(current_stim, memory_obs[e, ], w), c)
+      }, numeric(1))
+
+      # Mean similarity per category — removes category-frequency bias.
+      m1  <- mean(sims[memory_cat == 1])
+      m0  <- mean(sims[memory_cat == 0])
+      num <- bias * m1
+      den <- num + (1 - bias) * m0
+
+      prob_cat1[i] <- if (den > 1e-9) num / den else bias
+      prob_cat1[i] <- pmax(1e-9, pmin(1 - 1e-9, prob_cat1[i]))
+    }
+
+    sim_response[i] <- rbinom(1, 1, prob_cat1[i])
+
+    memory_obs <- rbind(memory_obs, current_stim)
+    memory_cat <- c(memory_cat, cat_feedback[i])
+  }
+
+  tibble(prob_cat1 = prob_cat1, sim_response = sim_response, cat_feedback = cat_feedback)
+}
+```
+
+```{r}
+
+# Select feature columns
+#features <- c("spots", "legs", "eyes", "arms", "colour_green")
+# Make it into a matrix
+#obs <- as.matrix(data[ , features])
+
+# True labels
+#cat_feedback <- data$danger_true
+# Some parameters
+#w <- c(0.2,0.2,0.2,0.2,0.2) # attention weights 
+#c <- 3 # Sensitivity
+#bias <- 0.7 # Category preference 
+
+# Test run 
+#test <- gcm_simulate(w,c,bias,obs,cat_feedback)
+
+```
+
+
+```{r}
+# Randomizes the order of the trials within each block, so it mimics an experimental setup for each agent:)
+
+shuffle_blocks <- function(data, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  
+  data %>%
+    group_by(block) %>%
+    slice_sample(prop = 1) %>%   # prop = 1 makes it shuffle within block
+    mutate(trial_in_block = row_number()) %>%
+    ungroup() %>%
+    mutate(trial_within_subject = row_number())
+}
+
+```
+
+
+```{r}
+simulate_gcm_agent <- function(agent_id, w_true, c_true, bias_true, data, seed = NULL) {
+  
+  # Shuffle trial order within each block
+  data_shuffled <- shuffle_blocks(data, seed = seed)
+  
+  # Extract true category labels (danger only)
+  feedback <- data_shuffled$danger_true
+  
+  # Extract the 5 binary features as a matrix
+  features <- c("spots", "legs", "eyes", "arms", "colour_green")
+  obs <- as.matrix(data_shuffled[, features])
+  
+  # Run GCM simulation
+  sim_results <- gcm_simulate(
+    w = w_true,
+    c = c_true,
+    bias = bias_true,
+    obs = obs,
+    cat_feedback = feedback,
+    quiet = TRUE
+  )
+  
+  # Return augmented dataset
+  data_shuffled %>%
+    mutate(
+      agent_id     = agent_id,
+      w1_true      = w_true[1],
+      w2_true      = w_true[2],
+      w3_true      = w_true[3],
+      w4_true      = w_true[4],
+      w5_true      = w_true[5],
+      c_true       = c_true,
+      log_c_true   = log(c_true),
+      bias_true    = bias_true,
+      prob_cat1    = sim_results$prob_cat1,
+      sim_response = sim_results$sim_response,
+      correct      = as.integer(danger_true == sim_results$sim_response)
+    ) %>%
+    group_by(agent_id) %>%
+    mutate(performance = cumsum(correct) / row_number()) %>%
+    ungroup()
+}
+
+```
+
+```{r}
+# Setting up three scenarios equal attention, more attention to the 2 key features, and obsessed with 1 key feature.
+param_grid <- expand_grid(
+  w_setting    = list(
+    c(0.2, 0.2, 0.2, 0.2, 0.2),
+    c(0.3, 0.1, 0.3, 0.15, 0.15),
+    c(0.1, 0.1, 0.6, 0.1, 0.1)
+  ),
+  c_setting    = c(0.5, 1.0, 2.0, 4.0, 5.0, 15.0),
+  bias_setting = 0.5
+) %>%
+  mutate(
+    setting_id = row_number(),
+    w_label    = map_chr(w_setting, ~paste(round(.x, 1), collapse = ",")),
+    c_label    = paste0("c≈", round(c_setting, 1)),
+    label      = paste0("w=(", w_label, "), ", c_label)
+  )
+
+```
+
+
+```{r}
+# multiple agents per setting
+n_agents_per_setting <- 5
+
+simulation_plan <- param_grid %>%
+  uncount(n_agents_per_setting) %>%
+  mutate(agent_id = row_number())
+
+```
+
+
+```{r}
+
+regenerate_simulations <- FALSE # set to true if you do not have a csv file with the simulated data already
+
+sim_file <- here("Assignment_4", "gcm_simulated_responses.csv")
+
+if (regenerate_simulations || !file.exists(sim_file)) {
+  
+  plan(multisession, workers = max(1, availableCores() - 1))
+  
+  simulated_responses <- future_pmap_dfr(
+    list(
+      agent_id  = simulation_plan$agent_id,
+      w_true    = simulation_plan$w_setting,
+      c_true    = simulation_plan$c_setting,
+      bias_true = simulation_plan$bias_setting,
+      seed      = simulation_plan$agent_id   # each agent gets its own shuffle
+    ),
+    ~ simulate_gcm_agent(
+        agent_id = ..1,
+        w_true   = ..2,
+        c_true   = ..3,
+        bias_true = ..4,
+        data = data,
+        seed = ..5
+      ),
+    .options = furrr_options(seed = TRUE)
+  )
+  
+  plan(sequential)
+  write_csv(simulated_responses, sim_file)
+  cat("Simulation complete. Results saved.\n")
+  
+} else {
+  simulated_responses <- read_csv(sim_file, show_col_types = FALSE)
+  cat("Loaded existing simulation results.\n")
+}
+
+
+```
+
+
+
+
+
+
+
+```{r}
+
+# Empirical data
+
+Alien_Data <- read.csv("AlienData.txt", stringsAsFactors = FALSE)
+# only data from session 1
+Alien_Data <- subset(AlienData, session == 1)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
