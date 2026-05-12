@@ -443,6 +443,298 @@ ggplot(prior_pred_summary, aes(x = trial)) +
 ```
 
 
+```{r}
+# single subject 
+df_subj <- subset(simulated_responses_labeled, agent_id==1)
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+stan_data <- list(
+  N_total       = nrow(df_subj),
+  N_features    = length(features),
+  y             = as.integer(df_subj$sim_response),   # or your empirical responses
+  obs           = as.matrix(df_subj[, features]),
+  cat_feedback  = as.integer(df_subj$danger_true),
+
+  prior_w_alpha     = rep(1, length(features)),  # Dirichlet(1,…,1)
+  prior_log_c_mu    = log(2),
+  prior_log_c_sigma = 1,
+  prior_bias_alpha  = 1,
+  prior_bias_beta   = 1,
+  run_diagnostics   = 1
+)
+
+
+
+```
+
+
+```{r}
+
+stan_file_gcm <- here("Assignment_4",  "GCM.stan")
+
+mod <- cmdstan_model(
+  stan_file_gcm,
+  cpp_options = list(stan_threads = FALSE),
+  stanc_options = list("O1")
+  )
+
+
+```
+
+```{r}
+
+fit_gcm <- mod$sample(
+  data = stan_data, 
+  seed = 123, # reproducibility
+  chains = 4, # nr. of MArkov-chains
+  parallel_chains = 4, #run them in parallel
+  # threads_per_chain = 1, # within-chain parallelization, here just in case
+  iter_warmup = 1000, # get discarded
+  iter_sampling = 2000, 
+  refresh = 500, # how often should progress updates be printed
+  max_treedepth = 10, # complexity of mcmc steps
+  adapt_delta = 0.99 # target acceptance rate
+  ) 
+
+```
+
+
+```{r}
+fit_gcm$summary(c("log_c", "bias", "w"))
+```
+
+
+
+```{r}
+
+draws <- fit_gcm$draws() |> as_draws_df()
+
+prior_log_c <- rnorm(5000, mean = log(2), sd = 1)
+
+ggplot() +
+  geom_density(aes(x = prior_log_c), color = "grey60", linetype = "dashed") +
+  geom_density(data = draws, aes(x = log_c), color = "blue") +
+  labs(
+    title = "Prior vs Posterior: log(c)",
+    x = "log(c)", y = "Density"
+  )
+
+
+prior_bias <- rbeta(5000, 1, 1)
+
+ggplot() +
+  geom_density(aes(x = prior_bias), color = "grey60", linetype = "dashed") +
+  geom_density(data = draws, aes(x = bias), color = "blue") +
+  labs(
+    title = "Prior vs Posterior: bias",
+    x = "bias", y = "Density"
+  )
+
+```
+
+
+```{r}
+prior_w <- matrix(rexp(5000 * 5), ncol = 5)
+prior_w <- prior_w / rowSums(prior_w)
+prior_w_df <- as.data.frame(prior_w)
+names(prior_w_df) <- paste0("w", 1:5)
+
+for (i in 1:5) {
+  param_name <- paste0("w[", i, "]")
+  
+  p <- ggplot() +
+    geom_density(aes(x = prior_w_df[[i]]),
+                 color = "grey60", linetype = "dashed") +
+    geom_density(data = draws,
+                 aes(x = !!sym(param_name)),
+                 color = "blue") +
+    labs(
+      title = paste("Prior vs Posterior: w", i),
+      x = paste0("w", i), y = "Density"
+    )
+  
+  print(p)   # <-- THIS prints the actual plot
+}
+
+
+
+```
+
+
+```{r}
+
+prob_draws <- fit_gcm$draws("prob_cat1") |> as_draws_matrix()
+# dimensions: iterations x N_total
+
+N_total <- nrow(df_subj)
+n_sims  <- 500
+draw_ids <- sample(seq_len(nrow(prob_draws)), n_sims)
+
+ppc_curves <- lapply(draw_ids, function(d) {
+  p <- prob_draws[d, ]
+  y_rep <- rbinom(N_total, 1, p)
+  tibble(
+    trial   = seq_len(N_total),
+    correct = as.integer(y_rep == df_subj$danger_true)
+  ) |>
+    mutate(cum_acc = cumsum(correct) / row_number())
+}) |> bind_rows(.id = "sim_id")
+
+
+ppc_summary <- ppc_curves |>
+  group_by(trial) |>
+  summarise(
+    q05 = quantile(cum_acc, 0.05),
+    q25 = quantile(cum_acc, 0.25),
+    q50 = median(cum_acc),
+    q75 = quantile(cum_acc, 0.75),
+    q95 = quantile(cum_acc, 0.95),
+    .groups = "drop"
+  )
+
+
+obs_curve <- df_subj |>
+  mutate(correct = as.integer(sim_response == danger_true)) |>
+  mutate(cum_acc = cumsum(correct) / row_number()) |>
+  transmute(trial = row_number(), cum_acc)
+
+
+ggplot(ppc_summary, aes(x = trial)) +
+  geom_ribbon(aes(ymin = q05, ymax = q95), fill = "#56B4E9", alpha = 0.2) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), fill = "#56B4E9", alpha = 0.4) +
+  geom_line(aes(y = q50), color = "#0072B2", linewidth = 1) +
+  geom_line(data = obs_curve, aes(y = cum_acc), color = "black", linewidth = 1) +
+  labs(
+    title    = "Posterior Predictive Check: Learning Curve",
+    subtitle = "Blue ribbons: posterior predictive intervals; black: observed",
+    x = "Trial", y = "Cumulative Accuracy"
+  ) +
+  ylim(0, 1)
+
+
+
+
+
+```
+
+```{r}
+
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+#agent_ids <- sort(unique(simulated_responses$agent_id)) # All agents at once
+agent_ids <- sort(unique(simulated_responses$agent_id))[1:10] # Take 10 or how ever many agents at a time.
+n_agents  <- length(agent_ids)
+
+fits <- vector("list", n_agents)
+names(fits) <- agent_ids
+
+for (i in seq_along(agent_ids)) {
+  aid <- agent_ids[i]
+  
+  cat("\n==============================\n")
+  cat("Fitting agent", aid, "(", i, "of", n_agents, ")\n")
+  cat("==============================\n")
+  
+  df_s <- simulated_responses |>
+    filter(agent_id == aid) |>
+    arrange(trial_within_subject)
+  
+  stan_data <- list(
+    N_total = nrow(df_s),
+    N_features = length(features),
+    y = as.integer(df_s$sim_response),
+    obs = as.matrix(df_s[, features]),
+    cat_feedback = as.integer(df_s$danger_true),
+    prior_w_alpha     = rep(1, length(features)),
+    prior_log_c_mu    = log(2),
+    prior_log_c_sigma = 1,
+    prior_bias_alpha  = 1,
+    prior_bias_beta   = 1,
+    run_diagnostics   = 1
+  )
+  
+  # Fit model
+  fit <- mod$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 500,
+    iter_sampling = 500,
+    seed = 123,
+    refresh = 500, # how often should progress updates be printed
+    max_treedepth = 10, # complexity of mcmc steps
+    adapt_delta = 0.99 # target acceptance rate
+  )
+  
+  fits[[i]] <- fit
+  
+  cat("✓ Finished agent", aid, "\n")
+}
+
+
+
+
+
+
+```
+
+
+```{r}
+plot_ppc_all_agents <- function(fits, simulated_responses, n_sims = 200) {
+  
+  agent_ids <- as.integer(names(fits))
+  
+  for (aid in agent_ids) {
+    fit <- fits[[as.character(aid)]]
+    
+    df_s <- simulated_responses |>
+      filter(agent_id == aid) |>
+      arrange(trial_within_subject) |>
+      mutate(trial = trial_within_subject)   # <-- FIX HERE
+    
+    prob_draws <- fit$draws("prob_cat1") |> as_draws_matrix()
+    N <- nrow(df_s)
+    
+    idx <- sample(seq_len(nrow(prob_draws)), n_sims)
+    
+    sims <- map_dfr(idx, function(i) {
+      p <- prob_draws[i, ]
+      y_rep <- rbinom(N, 1, p)
+      tibble(
+        trial = seq_len(N),
+        cum_acc = cumsum(y_rep == df_s$danger_true) / seq_len(N)
+      )
+    }, .id = "sim")
+    
+    obs <- df_s |>
+      mutate(correct = as.integer(sim_response == danger_true),
+             cum_acc = cumsum(correct) / row_number())
+    
+    p <- ggplot() +
+      geom_line(data = sims, aes(trial, cum_acc, group = sim),
+                alpha = 0.1, color = "#56B4E9") +
+      geom_line(data = obs, aes(trial, cum_acc),
+                color = "black", linewidth = 1.2) +
+      labs(title = paste("Posterior Predictive Check — Agent", aid),
+           x = "Trial", y = "Cumulative Accuracy")
+    
+    print(p)
+  }
+}
+
+```
+
+
+
+```{r}
+
+plot_ppc_all_agents(fits, simulated_responses)
+
+
+
+```
 
 
 
