@@ -660,8 +660,8 @@ for (i in seq_along(agent_ids)) {
     data = stan_data,
     chains = 4,
     parallel_chains = 4,
-    iter_warmup = 500,
-    iter_sampling = 500,
+    iter_warmup = 1000,
+    iter_sampling = 2000,
     seed = 123,
     refresh = 500, # how often should progress updates be printed
     max_treedepth = 10, # complexity of mcmc steps
