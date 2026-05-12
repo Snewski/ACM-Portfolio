@@ -732,8 +732,6 @@ plot_ppc_all_agents <- function(fits, simulated_responses, n_sims = 200) {
 
 plot_ppc_all_agents(fits, simulated_responses)
 
-
-
 ```
 
 
@@ -748,23 +746,101 @@ plot_ppc_all_agents(fits, simulated_responses)
 
 Alien_Data <- read.csv("AlienData.txt", stringsAsFactors = FALSE)
 # only data from session 1
-Alien_Data <- subset(AlienData, session == 1)
+Alien_Data <- subset(Alien_Data, session == 1)
+
+# Removing test trials
+Alien_Data <- subset(Alien_Data, cycle != 0)
+
+# Creating features and danger stuff
+Alien_Data <- Alien_Data |>
+  mutate(
+    # Extract first 5 characters (binary feature string)
+    stim_bin = str_sub(stimulus, 1, 5),
+    
+    # Split into individual digits
+    spots        = as.integer(str_sub(stim_bin, 1, 1)),
+    legs         = as.integer(str_sub(stim_bin, 2, 2)),
+    eyes         = as.integer(str_sub(stim_bin, 3, 3)),
+    arms         = as.integer(str_sub(stim_bin, 4, 4)),
+    colour_green = as.integer(str_sub(stim_bin, 5, 5)),
+    danger_response = as.integer(response %in% c(3, 4)),
+    danger_true    = as.integer(spots == 1 & eyes == 1)
+  )
+
+# Removing unnecessary columns
+Alien_Data <- Alien_Data |>
+  dplyr::select(
+    -RT, -motivation, -competence, -communication,
+    -complement, -test, -cumulative, -nutricious, -stim_bin, -correct
+  )
+
+
+# Subset each condition maybe???
+
+Alien_Data_1 <- subset(Alien_Data, condition == 1)
+#Alien_Data_2 <- subset(Alien_Data, condition == 2)
+
+
+
 
 ```
 
 
 
+```{r}
+
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+# Identify the first x subjects
+subject_ids <- sort(unique(Alien_Data_1$subject))#[1:10] # uncomment for smaller fitting subsets
+n_subj <- length(subject_ids)
+
+fits_empirical <- vector("list", n_subj)
+names(fits_empirical) <- subject_ids
+
+for (i in seq_along(subject_ids)) {
+  sid <- subject_ids[i]
+  
+  cat("\n==============================\n")
+  cat("Fitting subject", sid, "(", i, "of", n_subj, ")\n")
+  cat("==============================\n")
+  
+  df_s <- Alien_Data_1 |>
+    filter(subject == sid) |>
+    arrange(trial)   # trials already ordered
+  
+  stan_data <- list(
+    N_total = nrow(df_s),
+    N_features = length(features),
+    y = as.integer(df_s$danger_response),     # participant response (0/1)
+    obs = as.matrix(df_s[, features]),     # 5 binary features
+    cat_feedback = as.integer(df_s$danger_true),  # true category (0/1)
+    prior_w_alpha     = rep(1, length(features)),
+    prior_log_c_mu    = log(2),
+    prior_log_c_sigma = 1,
+    prior_bias_alpha  = 1,
+    prior_bias_beta   = 1,
+    run_diagnostics   = 1
+  )
+  
+  fit <- mod$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 500,
+    iter_sampling = 500,
+    seed = 123
+  )
+  
+  fits_empirical[[i]] <- fit
+  
+  cat("✓ Finished subject", sid, "\n")
+}
 
 
 
-
-
-
-
-
-
-
-
+```
 
 
 
