@@ -4,6 +4,28 @@ output: html_document
 ---
 
 
+```{r}
+# Packages
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future,        # Future backend
+  loo,
+  patchwork
+)
+
+# parallel setup
+n_cores <- parallel::detectCores() -2
+plan(multisession, workers = n_cores)
+
+#default ggplot theme
+theme_set(theme_classic())
+```
+
 
 ```{r}
 
@@ -735,11 +757,6 @@ plot_ppc_all_agents(fits, simulated_responses)
 ```
 
 
-
-
-
-
-
 ```{r}
 
 # Empirical data
@@ -778,10 +795,114 @@ Alien_Data <- Alien_Data |>
 # Subset each condition maybe???
 
 Alien_Data_1 <- subset(Alien_Data, condition == 1)
-#Alien_Data_2 <- subset(Alien_Data, condition == 2)
+Alien_Data_2 <- subset(Alien_Data, condition == 2)
 
 
 
+
+```
+
+
+```{r}
+
+# Compute cumulative accuracy per condition 
+empirical_perf <- Alien_Data |>
+  arrange(subject, condition, trial) |>
+  group_by(subject, condition) |>
+  mutate(
+    correct = as.integer(danger_response == danger_true),
+    performance = cumsum(correct) / row_number()
+  ) |>
+  ungroup()
+
+
+p_empirical_cond <- ggplot(
+  empirical_perf,
+  aes(
+    x = trial,
+    y = performance,
+    color = factor(condition)
+  )
+) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    linewidth = 1.2
+  ) +
+  scale_color_brewer(palette = "Dark2", name = "Condition") +
+  labs(
+    title    = "Empirical Learning Performance by Condition",
+    subtitle = "Mean cumulative accuracy across participants",
+    x = "Trial",
+    y = "Cumulative Accuracy"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+p_empirical_cond
+
+
+```
+
+
+```{r}
+
+# --- Simulated performance ---
+sim_perf <- simulated_responses_labeled |>
+  arrange(agent_id, trial_within_subject) |>
+  group_by(agent_id) |>
+  mutate(
+    correct = as.integer(sim_response == danger_true),
+    performance = cumsum(correct) / row_number()
+  ) |>
+  ungroup() |>
+  mutate(
+    source = "Simulated",
+    trial = trial_within_subject,
+    c_level = factor(round(c_true, 1))   # <-- sensitivity grouping
+  )
+
+# --- Empirical performance ---
+emp_perf <- Alien_Data |>
+  arrange(subject, trial) |>
+  group_by(subject) |>
+  mutate(
+    correct = as.integer(danger_response == danger_true),
+    performance = cumsum(correct) / row_number()
+  ) |>
+  ungroup() |>
+  mutate(
+    source = "Empirical",
+    c_level = "Empirical"   # placeholder so aes(color=...) works
+  )
+
+# --- Combine ---
+combined_perf <- bind_rows(sim_perf, emp_perf)
+
+# --- Plot ---
+p_compare_c <- ggplot(
+  combined_perf,
+  aes(x = trial, y = performance, color = c_level)
+) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    linewidth = 1.3
+  ) +
+  scale_color_viridis_d(
+    option = "plasma",
+    name = "Sensitivity (c)",
+    begin = 0.1, end = 0.9
+  ) +
+  labs(
+    title = "Empirical vs. Simulated Learning Performance",
+    subtitle = "Simulated agents grouped by sensitivity; empirical shown as separate curve",
+    x = "Trial",
+    y = "Cumulative Accuracy"
+  ) +
+  theme_minimal(base_size = 14)
+
+p_compare_c
 
 ```
 
@@ -792,7 +913,7 @@ Alien_Data_1 <- subset(Alien_Data, condition == 1)
 
 features <- c("spots", "legs", "eyes", "arms", "colour_green")
 
-# Identify the first x subjects
+# Identify the first x subjects in the first condition.
 subject_ids <- sort(unique(Alien_Data_1$subject))#[1:10] # uncomment for smaller fitting subsets
 n_subj <- length(subject_ids)
 
