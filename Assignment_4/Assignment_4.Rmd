@@ -1,0 +1,970 @@
+---
+title: "Assignment_4"
+output: html_document
+---
+
+
+```{r}
+# Packages
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future,        # Future backend
+  loo,
+  patchwork
+)
+
+# parallel setup
+n_cores <- parallel::detectCores() -2
+plan(multisession, workers = n_cores)
+
+#default ggplot theme
+theme_set(theme_classic())
+```
+
+
+```{r}
+
+# All 32 possible 5‑dimensional binary stimuli
+stimuli <- expand.grid(
+  spots = 0:1,
+  legs = 0:1,
+  eyes = 0:1,
+  arms = 0:1,
+  colour_green = 0:1
+)
+
+stimuli$stim_id <- 1:nrow(stimuli)
+# Association between feature and category for the first session
+stimuli$danger_true <- with(stimuli, ifelse(spots == 1 & eyes == 1, 1, 0))
+#stimuli$nutrition_true <- with(stimuli, ifelse(arms == 1, 1, 0))
+
+# randomizing the order of 3 blocks.
+
+set.seed(4)  # reproducible stuff
+
+n_blocks <- 3 # 3 reps of all stimuli
+
+data <- do.call(
+  rbind,
+  lapply(1:n_blocks, function(b) {
+    block <- stimuli[sample(1:32), ]
+    block$block <- b
+    block$trial_in_block <- 1:32
+    block
+  })
+)
+
+# Add trial_within_subject (overall trial number across all blocks)
+#data$trial_within_subject <- 1:nrow(data)
+
+
+
+```
+
+
+```{r}
+
+distance <- function(vect1, vect2, w) {
+  sum(w * abs(vect1 - vect2))
+}
+
+similarity <- function(dist_val, c) {
+  exp(-c * dist_val)
+}
+```
+
+
+```{r}
+# Generative GCM model function.
+gcm_simulate <- function(w,            # attention weights (sums to 1)
+                         c,            # sensitivity (natural scale, strictly positive)
+                         bias,         # response bias towards category 1
+                         obs,          # matrix of stimulus features (trials x features)
+                         cat_feedback, # true category labels (0 or 1)
+                         quiet = TRUE) {
+  ntrials   <- nrow(obs)
+  nfeatures <- ncol(obs)
+
+  prob_cat1    <- numeric(ntrials)
+  sim_response <- numeric(ntrials)
+
+  memory_obs <- matrix(NA_real_, nrow = 0, ncol = nfeatures)
+  memory_cat <- numeric(0)
+
+  for (i in seq_len(ntrials)) {
+    if (!quiet && i %% 20 == 0) cat("Simulating trial:", i, "\n")
+
+    current_stim <- as.numeric(obs[i, ])
+    n_mem        <- nrow(memory_obs)
+    has_cat0     <- any(memory_cat == 0)
+    has_cat1     <- any(memory_cat == 1)
+
+    if (n_mem == 0 || !has_cat0 || !has_cat1) {
+      prob_cat1[i] <- bias
+    } else {
+      sims <- vapply(seq_len(n_mem), function(e) {
+        similarity(distance(current_stim, memory_obs[e, ], w), c)
+      }, numeric(1))
+
+      # Mean similarity per category — removes category-frequency bias.
+      m1  <- mean(sims[memory_cat == 1])
+      m0  <- mean(sims[memory_cat == 0])
+      num <- bias * m1
+      den <- num + (1 - bias) * m0
+
+      prob_cat1[i] <- if (den > 1e-9) num / den else bias
+      prob_cat1[i] <- pmax(1e-9, pmin(1 - 1e-9, prob_cat1[i]))
+    }
+
+    sim_response[i] <- rbinom(1, 1, prob_cat1[i])
+
+    memory_obs <- rbind(memory_obs, current_stim)
+    memory_cat <- c(memory_cat, cat_feedback[i])
+  }
+
+  tibble(prob_cat1 = prob_cat1, sim_response = sim_response, cat_feedback = cat_feedback)
+}
+```
+
+```{r}
+
+# Select feature columns
+#features <- c("spots", "legs", "eyes", "arms", "colour_green")
+# Make it into a matrix
+#obs <- as.matrix(data[ , features])
+
+# True labels
+#cat_feedback <- data$danger_true
+# Some parameters
+#w <- c(0.2,0.2,0.2,0.2,0.2) # attention weights 
+#c <- 3 # Sensitivity
+#bias <- 0.7 # Category preference 
+
+# Test run 
+#test <- gcm_simulate(w,c,bias,obs,cat_feedback)
+
+```
+
+
+```{r}
+# Randomizes the order of the trials within each block, so it mimics an experimental setup for each agent:)
+
+shuffle_blocks <- function(data, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  
+  data %>%
+    group_by(block) %>%
+    slice_sample(prop = 1) %>%   # prop = 1 makes it shuffle within block
+    mutate(trial_in_block = row_number()) %>%
+    ungroup() %>%
+    mutate(trial_within_subject = row_number())
+}
+
+```
+
+
+```{r}
+simulate_gcm_agent <- function(agent_id, w_true, c_true, bias_true, data, seed = NULL) {
+  
+  # Shuffle trial order within each block
+  data_shuffled <- shuffle_blocks(data, seed = seed)
+  
+  # Extract true category labels (danger only)
+  feedback <- data_shuffled$danger_true
+  
+  # Extract the 5 binary features as a matrix
+  features <- c("spots", "legs", "eyes", "arms", "colour_green")
+  obs <- as.matrix(data_shuffled[, features])
+  
+  # Run GCM simulation
+  sim_results <- gcm_simulate(
+    w = w_true,
+    c = c_true,
+    bias = bias_true,
+    obs = obs,
+    cat_feedback = feedback,
+    quiet = TRUE
+  )
+  
+  # Return augmented dataset
+  data_shuffled %>%
+    mutate(
+      agent_id     = agent_id,
+      w1_true      = w_true[1],
+      w2_true      = w_true[2],
+      w3_true      = w_true[3],
+      w4_true      = w_true[4],
+      w5_true      = w_true[5],
+      c_true       = c_true,
+      log_c_true   = log(c_true),
+      bias_true    = bias_true,
+      prob_cat1    = sim_results$prob_cat1,
+      sim_response = sim_results$sim_response,
+      correct      = as.integer(danger_true == sim_results$sim_response)
+    ) %>%
+    group_by(agent_id) %>%
+    mutate(performance = cumsum(correct) / row_number()) %>%
+    ungroup()
+}
+
+```
+
+```{r}
+# Setting up three scenarios equal attention, more attention to the 2 key features, and obsessed with 1 key feature.
+param_grid <- expand_grid(
+  w_setting    = list(
+    c(0.2, 0.2, 0.2, 0.2, 0.2),
+    c(0.3, 0.1, 0.3, 0.15, 0.15),
+    c(0.1, 0.1, 0.6, 0.1, 0.1)
+  ),
+  c_setting    = c(0.5, 1.0, 2.0, 4.0, 5.0, 15.0),
+  bias_setting = 0.5
+) %>%
+  mutate(
+    setting_id = row_number(),
+    w_label    = map_chr(w_setting, ~paste(round(.x, 1), collapse = ",")),
+    c_label    = paste0("c≈", round(c_setting, 1)),
+    label      = paste0("w=(", w_label, "), ", c_label)
+  )
+
+```
+
+
+```{r}
+# multiple agents per setting
+n_agents_per_setting <- 5
+
+simulation_plan <- param_grid %>%
+  uncount(n_agents_per_setting) %>%
+  mutate(agent_id = row_number())
+
+```
+
+
+```{r}
+
+regenerate_simulations <- FALSE # set to true if you do not have a csv file with the simulated data already
+
+sim_file <- here("Assignment_4", "gcm_simulated_responses.csv")
+
+if (regenerate_simulations || !file.exists(sim_file)) {
+  
+  plan(multisession, workers = max(1, availableCores() - 1))
+  
+  simulated_responses <- future_pmap_dfr(
+    list(
+      agent_id  = simulation_plan$agent_id,
+      w_true    = simulation_plan$w_setting,
+      c_true    = simulation_plan$c_setting,
+      bias_true = simulation_plan$bias_setting,
+      seed      = simulation_plan$agent_id   # each agent gets its own shuffle
+    ),
+    ~ simulate_gcm_agent(
+        agent_id = ..1,
+        w_true   = ..2,
+        c_true   = ..3,
+        bias_true = ..4,
+        data = data,
+        seed = ..5
+      ),
+    .options = furrr_options(seed = TRUE)
+  )
+  
+  plan(sequential)
+  write_csv(simulated_responses, sim_file)
+  cat("Simulation complete. Results saved.\n")
+  
+} else {
+  simulated_responses <- read_csv(sim_file, show_col_types = FALSE)
+  cat("Loaded existing simulation results.\n")
+}
+
+
+```
+
+
+```{r}
+simulated_responses_labeled <- simulated_responses %>%
+  mutate(
+    # NEW: label all 5 weights
+    w_label = paste0(
+      "w=(",
+      round(w1_true, 1), ",",
+      round(w2_true, 1), ",",
+      round(w3_true, 1), ",",
+      round(w4_true, 1), ",",
+      round(w5_true, 1), ")"
+    ),
+    
+    c_label = paste0("c≈", round(c_true, 1)),
+    
+    # Order facets by numeric c value
+    c_label = forcats::fct_reorder(c_label, c_true)
+  )
+
+
+p_c_effect <- ggplot(
+  simulated_responses_labeled,
+  aes(
+    x = trial_within_subject,
+    y = performance,
+    color = factor(round(c_true, 1)),
+    group = interaction(agent_id, round(c_true, 1))
+  )
+) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    aes(group = factor(round(c_true, 1))),
+    linewidth = 1.2
+  ) +
+  facet_wrap(~ w_label) +
+  scale_color_viridis_d(option = "plasma", name = "Sensitivity (c)") +
+  labs(
+    title    = "Effect of Sensitivity (c) on GCM Learning",
+    subtitle = "Mean across simulated agents",
+    x = "Trial",
+    y = "Cumulative Accuracy"
+  ) +
+  theme(legend.position = "bottom")
+
+
+p_w_effect <- ggplot(
+  simulated_responses_labeled,
+  aes(
+    x = trial_within_subject,
+    y = performance,
+    color = w_label,
+    group = interaction(agent_id, w_label)
+  )
+) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    aes(group = w_label),
+    linewidth = 1.2
+  ) +
+  facet_wrap(~ c_label) +
+  scale_color_brewer(palette = "Set1", name = "Attention Weights") +
+  labs(
+    title    = "Effect of Attention Weights (w) on GCM Learning",
+    subtitle = "Mean across simulated agents",
+    x = "Trial",
+    y = "Cumulative Accuracy"
+  ) +
+  theme(legend.position = "bottom")
+
+
+```
+
+
+```{r}
+p_c_effect
+
+p_w_effect
+
+
+```
+
+
+```{r}
+
+n_prior_samples <- 500
+
+# Prior for log(c): Normal(log(2), 1)
+LOG_C_PRIOR_MEAN <- log(2)
+LOG_C_PRIOR_SD   <- 1
+
+
+# Dirichlet sampler for 5 weights
+rdirichlet_5 <- function(n) {
+  mat <- matrix(rexp(n * 5, rate = 1), ncol = 5)
+  mat / rowSums(mat)
+}
+
+prior_draws <- tibble(
+  sample_id = seq_len(n_prior_samples),
+  log_c     = rnorm(n_prior_samples, LOG_C_PRIOR_MEAN, LOG_C_PRIOR_SD),
+  bias      = rbeta(n_prior_samples, 1, 1)
+) %>%
+  mutate(
+    c_true = exp(log_c),
+    w_list = split(rdirichlet_5(n_prior_samples), seq_len(n_prior_samples))
+  )
+
+ppc_schedule <- data %>%
+  arrange(block, trial_in_block)   # fixed canonical order
+
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+obs_ppc  <- as.matrix(ppc_schedule[, features])
+feedback <- ppc_schedule$danger_true
+
+prior_pred_curves <- pmap_dfr(
+  list(
+    sample_id = prior_draws$sample_id,
+    w_true    = prior_draws$w_list,
+    c_true    = prior_draws$c_true,
+    bias_true = prior_draws$bias
+  ),
+  function(sample_id, w_true, c_true, bias_true) {
+    
+    sim <- gcm_simulate(
+      w = w_true,
+      c = c_true,
+      bias = bias_true,
+      obs = obs_ppc,
+      cat_feedback = feedback,
+      quiet = TRUE
+    )
+    
+    tibble(
+      sample_id = sample_id,
+      trial     = seq_len(nrow(ppc_schedule)),
+      correct   = as.integer(sim$sim_response == feedback)
+    ) %>%
+      mutate(cum_acc = cumsum(correct) / row_number())
+  }
+)
+
+prior_pred_summary <- prior_pred_curves %>%
+  group_by(trial) %>%
+  summarise(
+    q05 = quantile(cum_acc, 0.05),
+    q25 = quantile(cum_acc, 0.25),
+    q50 = median(cum_acc),
+    q75 = quantile(cum_acc, 0.75),
+    q95 = quantile(cum_acc, 0.95),
+    .groups = "drop"
+  )
+
+
+
+
+```
+
+```{r}
+ggplot(prior_pred_summary, aes(x = trial)) +
+  geom_ribbon(aes(ymin = q05, ymax = q95), fill = "#56B4E9", alpha = 0.20) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), fill = "#56B4E9", alpha = 0.40) +
+  geom_line(aes(y = q50), color = "#0072B2", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey40") +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    title    = "Prior Predictive Check: GCM Learning Curves",
+    subtitle = "Ribbons: 50% and 90% prior predictive intervals; line: median\nPriors: log(c) ~ Normal(log 2, 1),  w ~ Dirichlet(1,1,1,1,1),  bias ~ Beta(1,1)",
+    x = "Trial", y = "Cumulative Accuracy"
+  )
+
+```
+
+
+```{r}
+# single subject 
+df_subj <- subset(simulated_responses_labeled, agent_id==1)
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+stan_data <- list(
+  N_total       = nrow(df_subj),
+  N_features    = length(features),
+  y             = as.integer(df_subj$sim_response),   # or your empirical responses
+  obs           = as.matrix(df_subj[, features]),
+  cat_feedback  = as.integer(df_subj$danger_true),
+
+  prior_w_alpha     = rep(1, length(features)),  # Dirichlet(1,…,1)
+  prior_log_c_mu    = log(2),
+  prior_log_c_sigma = 1,
+  prior_bias_alpha  = 1,
+  prior_bias_beta   = 1,
+  run_diagnostics   = 1
+)
+
+
+
+```
+
+
+```{r}
+
+stan_file_gcm <- here("Assignment_4",  "GCM.stan")
+
+mod <- cmdstan_model(
+  stan_file_gcm,
+  cpp_options = list(stan_threads = FALSE),
+  stanc_options = list("O1")
+  )
+
+
+```
+
+```{r}
+
+fit_gcm <- mod$sample(
+  data = stan_data, 
+  seed = 123, # reproducibility
+  chains = 4, # nr. of MArkov-chains
+  parallel_chains = 4, #run them in parallel
+  # threads_per_chain = 1, # within-chain parallelization, here just in case
+  iter_warmup = 1000, # get discarded
+  iter_sampling = 2000, 
+  refresh = 500, # how often should progress updates be printed
+  max_treedepth = 10, # complexity of mcmc steps
+  adapt_delta = 0.99 # target acceptance rate
+  ) 
+
+```
+
+
+```{r}
+fit_gcm$summary(c("log_c", "bias", "w"))
+```
+
+
+
+```{r}
+
+draws <- fit_gcm$draws() |> as_draws_df()
+
+prior_log_c <- rnorm(5000, mean = log(2), sd = 1)
+
+ggplot() +
+  geom_density(aes(x = prior_log_c), color = "grey60", linetype = "dashed") +
+  geom_density(data = draws, aes(x = log_c), color = "blue") +
+  labs(
+    title = "Prior vs Posterior: log(c)",
+    x = "log(c)", y = "Density"
+  )
+
+
+prior_bias <- rbeta(5000, 1, 1)
+
+ggplot() +
+  geom_density(aes(x = prior_bias), color = "grey60", linetype = "dashed") +
+  geom_density(data = draws, aes(x = bias), color = "blue") +
+  labs(
+    title = "Prior vs Posterior: bias",
+    x = "bias", y = "Density"
+  )
+
+```
+
+
+```{r}
+prior_w <- matrix(rexp(5000 * 5), ncol = 5)
+prior_w <- prior_w / rowSums(prior_w)
+prior_w_df <- as.data.frame(prior_w)
+names(prior_w_df) <- paste0("w", 1:5)
+
+for (i in 1:5) {
+  param_name <- paste0("w[", i, "]")
+  
+  p <- ggplot() +
+    geom_density(aes(x = prior_w_df[[i]]),
+                 color = "grey60", linetype = "dashed") +
+    geom_density(data = draws,
+                 aes(x = !!sym(param_name)),
+                 color = "blue") +
+    labs(
+      title = paste("Prior vs Posterior: w", i),
+      x = paste0("w", i), y = "Density"
+    )
+  
+  print(p)   # <-- THIS prints the actual plot
+}
+
+
+
+```
+
+
+```{r}
+
+prob_draws <- fit_gcm$draws("prob_cat1") |> as_draws_matrix()
+# dimensions: iterations x N_total
+
+N_total <- nrow(df_subj)
+n_sims  <- 500
+draw_ids <- sample(seq_len(nrow(prob_draws)), n_sims)
+
+ppc_curves <- lapply(draw_ids, function(d) {
+  p <- prob_draws[d, ]
+  y_rep <- rbinom(N_total, 1, p)
+  tibble(
+    trial   = seq_len(N_total),
+    correct = as.integer(y_rep == df_subj$danger_true)
+  ) |>
+    mutate(cum_acc = cumsum(correct) / row_number())
+}) |> bind_rows(.id = "sim_id")
+
+
+ppc_summary <- ppc_curves |>
+  group_by(trial) |>
+  summarise(
+    q05 = quantile(cum_acc, 0.05),
+    q25 = quantile(cum_acc, 0.25),
+    q50 = median(cum_acc),
+    q75 = quantile(cum_acc, 0.75),
+    q95 = quantile(cum_acc, 0.95),
+    .groups = "drop"
+  )
+
+
+obs_curve <- df_subj |>
+  mutate(correct = as.integer(sim_response == danger_true)) |>
+  mutate(cum_acc = cumsum(correct) / row_number()) |>
+  transmute(trial = row_number(), cum_acc)
+
+
+ggplot(ppc_summary, aes(x = trial)) +
+  geom_ribbon(aes(ymin = q05, ymax = q95), fill = "#56B4E9", alpha = 0.2) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), fill = "#56B4E9", alpha = 0.4) +
+  geom_line(aes(y = q50), color = "#0072B2", linewidth = 1) +
+  geom_line(data = obs_curve, aes(y = cum_acc), color = "black", linewidth = 1) +
+  labs(
+    title    = "Posterior Predictive Check: Learning Curve",
+    subtitle = "Blue ribbons: posterior predictive intervals; black: observed",
+    x = "Trial", y = "Cumulative Accuracy"
+  ) +
+  ylim(0, 1)
+
+
+
+
+
+```
+
+```{r}
+
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+#agent_ids <- sort(unique(simulated_responses$agent_id)) # All agents at once
+agent_ids <- sort(unique(simulated_responses$agent_id))[1:10] # Take 10 or how ever many agents at a time.
+n_agents  <- length(agent_ids)
+
+fits <- vector("list", n_agents)
+names(fits) <- agent_ids
+
+for (i in seq_along(agent_ids)) {
+  aid <- agent_ids[i]
+  
+  cat("\n==============================\n")
+  cat("Fitting agent", aid, "(", i, "of", n_agents, ")\n")
+  cat("==============================\n")
+  
+  df_s <- simulated_responses |>
+    filter(agent_id == aid) |>
+    arrange(trial_within_subject)
+  
+  stan_data <- list(
+    N_total = nrow(df_s),
+    N_features = length(features),
+    y = as.integer(df_s$sim_response),
+    obs = as.matrix(df_s[, features]),
+    cat_feedback = as.integer(df_s$danger_true),
+    prior_w_alpha     = rep(1, length(features)),
+    prior_log_c_mu    = log(2),
+    prior_log_c_sigma = 1,
+    prior_bias_alpha  = 1,
+    prior_bias_beta   = 1,
+    run_diagnostics   = 1
+  )
+  
+  # Fit model
+  fit <- mod$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 2000,
+    seed = 123,
+    refresh = 500, # how often should progress updates be printed
+    max_treedepth = 10, # complexity of mcmc steps
+    adapt_delta = 0.99 # target acceptance rate
+  )
+  
+  fits[[i]] <- fit
+  
+  cat("✓ Finished agent", aid, "\n")
+}
+
+
+
+
+
+
+```
+
+
+```{r}
+plot_ppc_all_agents <- function(fits, simulated_responses, n_sims = 200) {
+  
+  agent_ids <- as.integer(names(fits))
+  
+  for (aid in agent_ids) {
+    fit <- fits[[as.character(aid)]]
+    
+    df_s <- simulated_responses |>
+      filter(agent_id == aid) |>
+      arrange(trial_within_subject) |>
+      mutate(trial = trial_within_subject)   # <-- FIX HERE
+    
+    prob_draws <- fit$draws("prob_cat1") |> as_draws_matrix()
+    N <- nrow(df_s)
+    
+    idx <- sample(seq_len(nrow(prob_draws)), n_sims)
+    
+    sims <- map_dfr(idx, function(i) {
+      p <- prob_draws[i, ]
+      y_rep <- rbinom(N, 1, p)
+      tibble(
+        trial = seq_len(N),
+        cum_acc = cumsum(y_rep == df_s$danger_true) / seq_len(N)
+      )
+    }, .id = "sim")
+    
+    obs <- df_s |>
+      mutate(correct = as.integer(sim_response == danger_true),
+             cum_acc = cumsum(correct) / row_number())
+    
+    p <- ggplot() +
+      geom_line(data = sims, aes(trial, cum_acc, group = sim),
+                alpha = 0.1, color = "#56B4E9") +
+      geom_line(data = obs, aes(trial, cum_acc),
+                color = "black", linewidth = 1.2) +
+      labs(title = paste("Posterior Predictive Check — Agent", aid),
+           x = "Trial", y = "Cumulative Accuracy")
+    
+    print(p)
+  }
+}
+
+```
+
+
+
+```{r}
+
+plot_ppc_all_agents(fits, simulated_responses)
+
+```
+
+
+```{r}
+
+# Empirical data
+
+Alien_Data <- read.csv("AlienData.txt", stringsAsFactors = FALSE)
+# only data from session 1
+Alien_Data <- subset(Alien_Data, session == 1)
+
+# Removing test trials
+Alien_Data <- subset(Alien_Data, cycle != 0)
+
+# Creating features and danger stuff
+Alien_Data <- Alien_Data |>
+  mutate(
+    # Extract first 5 characters (binary feature string)
+    stim_bin = str_sub(stimulus, 1, 5),
+    
+    # Split into individual digits
+    spots        = as.integer(str_sub(stim_bin, 1, 1)),
+    legs         = as.integer(str_sub(stim_bin, 2, 2)),
+    eyes         = as.integer(str_sub(stim_bin, 3, 3)),
+    arms         = as.integer(str_sub(stim_bin, 4, 4)),
+    colour_green = as.integer(str_sub(stim_bin, 5, 5)),
+    danger_response = as.integer(response %in% c(3, 4)),
+    danger_true    = as.integer(spots == 1 & eyes == 1)
+  )
+
+# Removing unnecessary columns
+Alien_Data <- Alien_Data |>
+  dplyr::select(
+    -RT, -motivation, -competence, -communication,
+    -complement, -test, -cumulative, -nutricious, -stim_bin, -correct
+  )
+
+
+# Subset each condition maybe???
+
+Alien_Data_1 <- subset(Alien_Data, condition == 1)
+Alien_Data_2 <- subset(Alien_Data, condition == 2)
+
+
+
+
+```
+
+
+```{r}
+
+# Compute cumulative accuracy per condition 
+empirical_perf <- Alien_Data |>
+  arrange(subject, condition, trial) |>
+  group_by(subject, condition) |>
+  mutate(
+    correct = as.integer(danger_response == danger_true),
+    performance = cumsum(correct) / row_number()
+  ) |>
+  ungroup()
+
+
+p_empirical_cond <- ggplot(
+  empirical_perf,
+  aes(
+    x = trial,
+    y = performance,
+    color = factor(condition)
+  )
+) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    linewidth = 1.2
+  ) +
+  scale_color_brewer(palette = "Dark2", name = "Condition") +
+  labs(
+    title    = "Empirical Learning Performance by Condition",
+    subtitle = "Mean cumulative accuracy across participants",
+    x = "Trial",
+    y = "Cumulative Accuracy"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+p_empirical_cond
+
+
+```
+
+
+```{r}
+
+# --- Simulated performance ---
+sim_perf <- simulated_responses_labeled |>
+  arrange(agent_id, trial_within_subject) |>
+  group_by(agent_id) |>
+  mutate(
+    correct = as.integer(sim_response == danger_true),
+    performance = cumsum(correct) / row_number()
+  ) |>
+  ungroup() |>
+  mutate(
+    source = "Simulated",
+    trial = trial_within_subject,
+    c_level = factor(round(c_true, 1))   # <-- sensitivity grouping
+  )
+
+# --- Empirical performance ---
+emp_perf <- Alien_Data |>
+  arrange(subject, trial) |>
+  group_by(subject) |>
+  mutate(
+    correct = as.integer(danger_response == danger_true),
+    performance = cumsum(correct) / row_number()
+  ) |>
+  ungroup() |>
+  mutate(
+    source = "Empirical",
+    c_level = "Empirical"   # placeholder so aes(color=...) works
+  )
+
+# --- Combine ---
+combined_perf <- bind_rows(sim_perf, emp_perf)
+
+# --- Plot ---
+p_compare_c <- ggplot(
+  combined_perf,
+  aes(x = trial, y = performance, color = c_level)
+) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    linewidth = 1.3
+  ) +
+  scale_color_viridis_d(
+    option = "plasma",
+    name = "Sensitivity (c)",
+    begin = 0.1, end = 0.9
+  ) +
+  labs(
+    title = "Empirical vs. Simulated Learning Performance",
+    subtitle = "Simulated agents grouped by sensitivity; empirical shown as separate curve",
+    x = "Trial",
+    y = "Cumulative Accuracy"
+  ) +
+  theme_minimal(base_size = 14)
+
+p_compare_c
+
+```
+
+
+
+```{r}
+
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+# Identify the first x subjects in the first condition.
+subject_ids <- sort(unique(Alien_Data_1$subject))#[1:10] # uncomment for smaller fitting subsets
+n_subj <- length(subject_ids)
+
+fits_empirical <- vector("list", n_subj)
+names(fits_empirical) <- subject_ids
+
+for (i in seq_along(subject_ids)) {
+  sid <- subject_ids[i]
+  
+  cat("\n==============================\n")
+  cat("Fitting subject", sid, "(", i, "of", n_subj, ")\n")
+  cat("==============================\n")
+  
+  df_s <- Alien_Data_1 |>
+    filter(subject == sid) |>
+    arrange(trial)   # trials already ordered
+  
+  stan_data <- list(
+    N_total = nrow(df_s),
+    N_features = length(features),
+    y = as.integer(df_s$danger_response),     # participant response (0/1)
+    obs = as.matrix(df_s[, features]),     # 5 binary features
+    cat_feedback = as.integer(df_s$danger_true),  # true category (0/1)
+    prior_w_alpha     = rep(1, length(features)),
+    prior_log_c_mu    = log(2),
+    prior_log_c_sigma = 1,
+    prior_bias_alpha  = 1,
+    prior_bias_beta   = 1,
+    run_diagnostics   = 1
+  )
+  
+  fit <- mod$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 2000,
+    seed = 123
+  )
+  
+  fits_empirical[[i]] <- fit
+  
+  cat("✓ Finished subject", sid, "\n")
+}
+
+
+
+```
+
+
+
+
+
+
