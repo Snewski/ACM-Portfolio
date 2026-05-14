@@ -1,0 +1,299 @@
+---
+title: "Assignment_4"
+output: html_document
+---
+
+```{r}
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future,        # Future backend
+  loo,
+  patchwork,
+  corrplot
+)
+```
+
+
+```{r}
+
+# All 32 possible 5‑dimensional binary stimuli
+stimuli <- expand.grid(
+  spots = 0:1,
+  legs = 0:1,
+  eyes = 0:1,
+  arms = 0:1,
+  colour_green = 0:1
+)
+
+stimuli$stim_id <- 1:nrow(stimuli)
+# Association between feature and category for the first session
+stimuli$danger_true <- with(stimuli, ifelse(spots == 1 & eyes == 1, 1, 0))
+stimuli$nutrition_true <- with(stimuli, ifelse(arms == 1, 1, 0))
+
+```
+
+
+```{r}
+# randomizing the order of 3 blocks.
+
+set.seed(4)  # reproducible stuff
+
+n_blocks <- 3 # 3 reps of all stimuli
+
+data <- do.call(
+  rbind,
+  lapply(1:n_blocks, function(b) {
+    block <- stimuli[sample(1:32), ]
+    block$block <- b
+    block$trial_in_block <- 1:32
+    block
+  })
+)
+# Add trial_within_subject (overall trial number across all blocks)
+data$trial_within_subject <- 1:nrow(data)
+# Empty for the agents choice 
+data$response_raw <- NA # Outcome 1–4 scale
+
+
+```
+
+
+```{r}
+
+# example outcome data
+data$response_raw <- sample(1:4, size = 96, replace = TRUE)
+
+# function for decoding the raw response
+decode_response <- function(x) {
+  list(
+    danger = ifelse(x %in% c(3,4), 1, 0),
+    nutrition = ifelse(x %in% c(2,4), 1, 0)
+  )
+}
+
+# decoding responses 
+data <- data %>%
+  mutate(decoded = map(response_raw, decode_response)) %>%
+  unnest_wider(decoded)
+
+colnames(data)
+
+```
+
+
+
+
+
+```{r}
+
+# Empirical data
+Alien_Data <- read.csv("AlienData.txt", stringsAsFactors = FALSE)
+# only data from session 1
+Alien_Data <- subset(Alien_Data, session == 1)
+
+```
+```{r}
+# City-block distance (r = 1), attention-weighted
+distance <- function(vect1, vect2, w) {
+  sum(w * abs(vect1 - vect2))
+}
+
+# Exponential similarity kernel
+similarity <- function(dist_val, c) {
+  exp(-c * dist_val)
+}
+```
+
+
+```{r}
+# Take the features and put it in a matrix
+features = c("spots", "legs", "eyes", "arms", "colour_green")
+obs_matrix = as.matrix(data[, features])
+
+```
+
+
+
+```{r}
+# Generative GCM model function.
+gcm_simulate <- function(w,            # attention weights (sums to 1)
+                         c,            # sensitivity (natural scale, strictly positive)
+                         bias,         # response bias towards category 1
+                         obs,          # matrix of stimulus features (trials x features)
+                         cat_feedback,
+                         quiet = TRUE) {
+  
+  ntrials   <- nrow(obs) 
+  nfeatures <- ncol(obs)
+
+  prob_cat1    <- numeric(ntrials)
+  sim_response <- numeric(ntrials)
+
+  memory_obs <- matrix(NA_real_, nrow = 0, ncol = nfeatures)
+  memory_cat <- numeric(0)
+
+  for (i in seq_len(ntrials)) {
+    if (!quiet && i %% 20 == 0) cat("Simulating trial:", i, "\n")
+
+    current_stim <- as.numeric(obs[i, ])
+    n_mem        <- nrow(memory_obs)
+    has_cat0     <- any(memory_cat == 0)
+    has_cat1     <- any(memory_cat == 1)
+
+    if (n_mem == 0 || !has_cat0 || !has_cat1) {
+      prob_cat1[i] <- bias
+    } else {
+      sims <- vapply(seq_len(n_mem), function(e) {
+        similarity(distance(current_stim, memory_obs[e, ], w), c)
+      }, numeric(1))
+
+      # Mean similarity per category — removes category-frequency bias.
+      m1  <- mean(sims[memory_cat == 1])
+      m0  <- mean(sims[memory_cat == 0])
+      num <- bias * m1
+      den <- num + (1 - bias) * m0
+
+      prob_cat1[i] <- if (den > 1e-9) num / den else bias
+      prob_cat1[i] <- pmax(1e-9, pmin(1 - 1e-9, prob_cat1[i]))
+    }
+
+    sim_response[i] <- rbinom(1, 1, prob_cat1[i])
+
+    memory_obs <- rbind(memory_obs, current_stim)
+    memory_cat <- c(memory_cat, cat_feedback[i])
+  }
+
+  tibble(prob_cat1 = prob_cat1, sim_response = sim_response, cat_feedback = cat_feedback)
+}
+
+# Example with equal attention to all features
+sim_results = gcm_simulate(
+  w = c(0.2, 0.2, 0.2, 0.2, 0.2),  
+  c = 1.0,                           
+  bias = 0.5,                        
+  obs = obs_matrix,
+  cat_feedback =  data$danger_true,        
+  quiet = FALSE
+)
+
+# View results
+sim_results
+
+```
+
+
+```{r}
+library(ggplot2)
+
+sim_results$accuracy <- ifelse(sim_results$sim_response == sim_results$cat_feedback, 1, 0)
+
+ggplot(sim_results, aes(x = seq(1,96))) +
+  geom_line(aes(y = prob_cat1), color = "blue", size = 1) +
+  geom_line(aes(y = accuracy), color = "red", size = 1) +
+  ylim(0, 1) +
+  labs(x = "Trial", y = "Probability / Response",
+       title = "GCM Model Performance") +
+  theme_minimal()
+```
+```{r}
+# Calculate cumulative accuracy
+sim_results$cumulative_accuracy <- cumsum(results$accuracy) / 1:nrow(results)
+
+# Basic plot
+ggplot(sim_results, aes(x = seq(1:96), y = cumulative_accuracy)) +
+    geom_line(aes(y = prob_cat1), color = "blue", size = 1) +
+  geom_line(color = "darkgreen", size = 1.2) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.5) +
+  ylim(0, 1) +
+  labs(x = "Trial", y = "Cumulative Accuracy",
+       title = "Cumulative Accuracy") +
+  theme_minimal()
+```
+
+```{r}
+# ORDER MATTERS
+stimulus_info = data %>%
+  select(spots, legs, eyes, arms, colour_green, stim_id, danger_true, stim_id) %>%
+  distinct() 
+colnames(stimulus_info)
+stimulus_info
+
+
+```
+
+```{r}
+
+make_subject_schedule <- function(stimulus_info, n_blocks, seed) {
+  set.seed(seed)
+  n_stim <- nrow(stimulus_info)
+
+  sequence <- unlist(lapply(seq_len(n_blocks), function(b) {
+    sample(stimulus_info$stim_id, n_stim, replace = FALSE)
+  }))
+
+  tibble(
+    trial_within_subject = seq_along(sequence),
+    block                = rep(seq_len(n_blocks), each = n_stim),
+    stimulus_id          = sequence
+  ) |>
+    left_join(stimulus_info, by = c("stimulus_id" = "stim_id")) |>
+    rename(category_feedback = danger_true) |>
+    dplyr::select(trial_within_subject, block, stimulus_id,
+                  spots, legs, eyes, arms, colour_green, category_feedback)
+}
+```
+
+```{r}
+simulate_gcm_agent <- function(agent_id, w_true, c_true, bias_true,
+                               stimulus_info, n_blocks, subject_seed) {
+  schedule <- make_subject_schedule(stimulus_info, n_blocks, seed = subject_seed)
+  obs      <- schedule |> dplyr::select(spots, legs, eyes, arms, colour_green) # We select the features here
+  feedback <- schedule$category_feedback 
+
+  sim_results <- gcm_simulate(
+    w = w_true, 
+    c = c_true, 
+    bias = bias_true,
+    obs = obs, 
+    cat_feedback = feedback, 
+    quiet = TRUE
+  )
+
+  schedule |>
+    mutate(
+      agent_id     = agent_id,
+      w1_true      = w_true[1], # Spots
+      w2_true      = w_true[2], # Legs
+      w3_true      = w_true[3], # Eyes
+      w4_true      = w_true[4], # Arms
+      w5_true      = w_true[5], # color_green
+      c_true       = c_true,
+      log_c_true   = log(c_true),
+      bias_true    = bias_true,
+      prob_cat1    = sim_results$prob_cat1,
+      sim_response = sim_results$sim_response,
+      correct      = as.integer(category_feedback == sim_response)
+    ) |>
+    group_by(agent_id) |>
+    mutate(performance = cumsum(correct) / row_number()) |>
+    ungroup()
+}
+```
+```{r}
+agent_4 <- simulate_gcm_agent(
+  agent_id = 4,
+  w_true = c(0.2,0.2,0.2,0.2,0.2),
+  c_true = 1,
+  bias_true = 0.5,
+  stimulus_info = stimulus_info,
+  n_blocks = 3,
+  subject_seed = 4)
+agent_4
+```
+
+# Simulating behavior for multiple agents

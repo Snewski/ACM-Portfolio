@@ -914,7 +914,7 @@ p_compare_c
 features <- c("spots", "legs", "eyes", "arms", "colour_green")
 
 # Identify the first x subjects in the first condition.
-subject_ids <- sort(unique(Alien_Data_1$subject))#[1:10] # uncomment for smaller fitting subsets
+subject_ids <- sort(unique(Alien_Data_1$subject))[1:5] # uncomment for smaller fitting subsets
 n_subj <- length(subject_ids)
 
 fits_empirical <- vector("list", n_subj)
@@ -959,12 +959,354 @@ for (i in seq_along(subject_ids)) {
   cat("✓ Finished subject", sid, "\n")
 }
 
+# FOR CONDITION 2
+
+features <- c("spots", "legs", "eyes", "arms", "colour_green")
+
+# Identify the first x subjects in the second condition.
+subject_ids <- sort(unique(Alien_Data_2$subject))[1:5]  # first 5 subjects
+n_subj <- length(subject_ids)
+
+fits_empirical_2 <- vector("list", n_subj)
+names(fits_empirical_2) <- subject_ids
+
+for (i in seq_along(subject_ids)) {
+  sid <- subject_ids[i]
+  
+  cat("\n==============================\n")
+  cat("Fitting subject", sid, "(", i, "of", n_subj, ")\n")
+  cat("==============================\n")
+  
+  df_s <- Alien_Data_2 |>
+    filter(subject == sid) |>
+    arrange(trial)   # trials already ordered
+  
+  stan_data <- list(
+    N_total = nrow(df_s),
+    N_features = length(features),
+    y = as.integer(df_s$danger_response),     # participant response (0/1)
+    obs = as.matrix(df_s[, features]),     # 5 binary features
+    cat_feedback = as.integer(df_s$danger_true),  # true category (0/1)
+    prior_w_alpha     = rep(1, length(features)),
+    prior_log_c_mu    = log(2),
+    prior_log_c_sigma = 1,
+    prior_bias_alpha  = 1,
+    prior_bias_beta   = 1,
+    run_diagnostics   = 1
+  )
+  
+  fit <- mod$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 2000,
+    seed = 123
+  )
+  
+  fits_empirical_2[[i]] <- fit
+  
+  cat("✓ Finished subject", sid, "\n")
+}
+```
 
 
+```{r}
+
+# Check first subject only
+fit_check <- fits_empirical[[1]]
+
+# Diagnostic table
+summary_df <- fit_check$summary(c("w[1]", "w[2]", "w[3]", "w[4]", "w[5]", "log_c", "bias"))
+
+# Show R-hat values (should be < 1.05)
+summary_df |> select(variable, rhat, ess_bulk)
+
+# Trace plot for key parameters
+bayesplot::mcmc_trace(
+  fit_check$draws(c("log_c", "w[3]", "bias")),
+  facet_args = list(ncol = 1)
+)
+
+# Rank overlay plot
+bayesplot::mcmc_rank_overlay(
+  fit_check$draws(c("log_c", "w[3]", "bias"))
+)
+```
+```{r}
+#Hard coded
+if (!is.null(fits[[which(names(fits) == "1")]])) {
+  fit_gcm_single <- fits[[which(names(fits) == "1")]]
+  agent_to_fit <- simulated_responses |> filter(agent_id == 1) |> arrange(trial_within_subject)
+  
+  draws_df <- as_draws_df(
+    fit_gcm_single$draws(variables = c("w[1]", "log_c", "c", "bias"))
+  )
+
+  true_w1    <- agent_to_fit$w1_true[1]
+  true_log_c <- agent_to_fit$log_c_true[1]
+  true_c     <- agent_to_fit$c_true[1]
+  true_bias  <- agent_to_fit$bias_true[1]
+
+  set.seed(2026)
+  n_prior <- 4000
+  prior_df <- tibble(
+    `w[1]` = runif(n_prior),
+    log_c  = rnorm(n_prior, log(2), 1),
+    c      = exp(log_c),
+    bias   = rbeta(n_prior, 1, 1)
+  )
+
+  pp_panel <- function(prior_x, post_x, true_val, label) {
+    tibble(
+      x      = c(prior_x, post_x),
+      source = c(rep("Prior", length(prior_x)),
+                 rep("Posterior", length(post_x)))
+    ) |>
+      ggplot(aes(x = x, fill = source, color = source)) +
+      geom_density(alpha = 0.4, linewidth = 0.5) +
+      geom_vline(xintercept = true_val, color = "red",
+                 linetype = "dashed", linewidth = 0.7) +
+      scale_fill_manual(values = c(Prior = "grey60", Posterior = "#0072B2")) +
+      scale_color_manual(values = c(Prior = "grey40", Posterior = "#0072B2")) +
+      labs(title = label, x = NULL, y = "Density") +
+      theme(legend.position = "bottom")
+  }
+
+  p1 <- pp_panel(prior_df$`w[1]`, draws_df$`w[1]`, true_w1, "w[1] (spots)")
+  p2 <- pp_panel(prior_df$log_c,  draws_df$log_c,  true_log_c, "log(c) — computational scale")
+  p3 <- pp_panel(prior_df$c,      draws_df$c,      true_c,     "c — natural scale")
+  p4 <- pp_panel(prior_df$bias,   draws_df$bias,   true_bias,  "bias")
+
+  (p1 | p2) / (p3 | p4) +
+    plot_annotation(
+      title    = "Prior–Posterior Update - Simulated Agent 1 (Condition 1)",
+      subtitle = "Red dashed line = true generating value"
+    )
+}
+```
+```{r}
+if (!is.null(fits[[which(names(fits) == "6")]])) {
+  fit_gcm_single <- fits[[which(names(fits) == "1")]]
+  agent_to_fit <- simulated_responses |> filter(agent_id == 1) |> arrange(trial_within_subject)
+  
+  draws_df <- as_draws_df(
+    fit_gcm_single$draws(variables = c("w[1]", "log_c", "c", "bias"))
+  )
+
+  true_w1    <- agent_to_fit$w1_true[1]
+  true_log_c <- agent_to_fit$log_c_true[1]
+  true_c     <- agent_to_fit$c_true[1]
+  true_bias  <- agent_to_fit$bias_true[1]
+
+  set.seed(2026)
+  n_prior <- 4000
+  prior_df <- tibble(
+    `w[1]` = runif(n_prior),
+    log_c  = rnorm(n_prior, log(2), 1),
+    c      = exp(log_c),
+    bias   = rbeta(n_prior, 1, 1)
+  )
+
+  pp_panel <- function(prior_x, post_x, true_val, label) {
+    tibble(
+      x      = c(prior_x, post_x),
+      source = c(rep("Prior", length(prior_x)),
+                 rep("Posterior", length(post_x)))
+    ) |>
+      ggplot(aes(x = x, fill = source, color = source)) +
+      geom_density(alpha = 0.4, linewidth = 0.5) +
+      geom_vline(xintercept = true_val, color = "red",
+                 linetype = "dashed", linewidth = 0.7) +
+      scale_fill_manual(values = c(Prior = "grey60", Posterior = "#0072B2")) +
+      scale_color_manual(values = c(Prior = "grey40", Posterior = "#0072B2")) +
+      labs(title = label, x = NULL, y = "Density") +
+      theme(legend.position = "bottom")
+  }
+
+  p1 <- pp_panel(prior_df$`w[1]`, draws_df$`w[1]`, true_w1, "w[1] (spots)")
+  p2 <- pp_panel(prior_df$log_c,  draws_df$log_c,  true_log_c, "log(c) — computational scale")
+  p3 <- pp_panel(prior_df$c,      draws_df$c,      true_c,     "c — natural scale")
+  p4 <- pp_panel(prior_df$bias,   draws_df$bias,   true_bias,  "bias")
+
+  (p1 | p2) / (p3 | p4) +
+    plot_annotation(
+      title    = "Prior–Posterior Update - Simulated Agent 6 (Condition 2)",
+      subtitle = "Red dashed line = true generating value"
+    )
+}
+```
+```{r}
+if (!is.null(fits[[which(names(fits) == "11")]])) {
+  fit_gcm_single <- fits[[which(names(fits) == "1")]]
+  agent_to_fit <- simulated_responses |> filter(agent_id == 1) |> arrange(trial_within_subject)
+  
+  draws_df <- as_draws_df(
+    fit_gcm_single$draws(variables = c("w[1]", "log_c", "c", "bias"))
+  )
+
+  true_w1    <- agent_to_fit$w1_true[1]
+  true_log_c <- agent_to_fit$log_c_true[1]
+  true_c     <- agent_to_fit$c_true[1]
+  true_bias  <- agent_to_fit$bias_true[1]
+
+  set.seed(2026)
+  n_prior <- 4000
+  prior_df <- tibble(
+    `w[1]` = runif(n_prior),
+    log_c  = rnorm(n_prior, log(2), 1),
+    c      = exp(log_c),
+    bias   = rbeta(n_prior, 1, 1)
+  )
+
+  pp_panel <- function(prior_x, post_x, true_val, label) {
+    tibble(
+      x      = c(prior_x, post_x),
+      source = c(rep("Prior", length(prior_x)),
+                 rep("Posterior", length(post_x)))
+    ) |>
+      ggplot(aes(x = x, fill = source, color = source)) +
+      geom_density(alpha = 0.4, linewidth = 0.5) +
+      geom_vline(xintercept = true_val, color = "red",
+                 linetype = "dashed", linewidth = 0.7) +
+      scale_fill_manual(values = c(Prior = "grey60", Posterior = "#0072B2")) +
+      scale_color_manual(values = c(Prior = "grey40", Posterior = "#0072B2")) +
+      labs(title = label, x = NULL, y = "Density") +
+      theme(legend.position = "bottom")
+  }
+
+  p1 <- pp_panel(prior_df$`w[1]`, draws_df$`w[1]`, true_w1, "w[1] (spots)")
+  p2 <- pp_panel(prior_df$log_c,  draws_df$log_c,  true_log_c, "log(c) — computational scale")
+  p3 <- pp_panel(prior_df$c,      draws_df$c,      true_c,     "c — natural scale")
+  p4 <- pp_panel(prior_df$bias,   draws_df$bias,   true_bias,  "bias")
+
+  (p1 | p2) / (p3 | p4) +
+    plot_annotation(
+      title    = "Prior–Posterior Update - Simulated Agent 11 (Condition 3)",
+      subtitle = "Red dashed line = true generating value"
+    )
+}
 ```
 
 
 
+```{r}
+
+# First participant in condition 1
+fit_gcm_single <- fits_empirical[[1]]
+agent_to_fit <- Alien_Data_1 |> filter(subject == names(fits_empirical)[1]) |> arrange(trial)
+
+if (!is.null(fit_gcm_single)) {
+  prob_draws <- fit_gcm_single$draws("prob_cat1", format = "matrix")
+  n_draws    <- nrow(prob_draws)
+  n_trials   <- ncol(prob_draws)
+
+  set.seed(2025)
+  yrep_post <- matrix(rbinom(n_draws * n_trials, 1, as.vector(prob_draws)),
+                      nrow = n_draws)
+
+  obs_acc <- cummean(agent_to_fit$danger_response == agent_to_fit$danger_true)
+  rep_acc <- t(apply(yrep_post, 1, function(yr) {
+    cummean(yr == agent_to_fit$danger_true)
+  }))
+
+  ppc_summary <- tibble(
+    trial = seq_len(n_trials),
+    obs   = obs_acc,
+    q05   = apply(rep_acc, 2, quantile, 0.05),
+    q25   = apply(rep_acc, 2, quantile, 0.25),
+    q50   = apply(rep_acc, 2, quantile, 0.50),
+    q75   = apply(rep_acc, 2, quantile, 0.75),
+    q95   = apply(rep_acc, 2, quantile, 0.95)
+  )
+
+  ggplot(ppc_summary, aes(x = trial)) +
+    geom_ribbon(aes(ymin = q05, ymax = q95), fill = "#56B4E9", alpha = 0.20) +
+    geom_ribbon(aes(ymin = q25, ymax = q75), fill = "#56B4E9", alpha = 0.40) +
+    geom_line(aes(y = q50), color = "#0072B2", linewidth = 0.8) +
+    geom_line(aes(y = obs), color = "#D55E00", linewidth = 1) +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(
+      title    = paste("Posterior Predictive Check: Subject", names(fits_empirical)[1], "- Condition 1"),
+      subtitle = "Blue ribbons: 50% and 90% posterior predictive intervals\nOrange line: observed cumulative accuracy",
+      x = "Trial", y = "Cumulative Accuracy"
+    )
+}
+```
+```{r}
+# First participant in condition 2
+fit_gcm_single <- fits_empirical_2[[1]]
+agent_to_fit <- Alien_Data_2 |> filter(subject == names(fits_empirical_2)[1]) |> arrange(trial)
+
+if (!is.null(fit_gcm_single)) {
+  prob_draws <- fit_gcm_single$draws("prob_cat1", format = "matrix")
+  n_draws    <- nrow(prob_draws)
+  n_trials   <- ncol(prob_draws)
+
+  set.seed(2025)
+  yrep_post <- matrix(rbinom(n_draws * n_trials, 1, as.vector(prob_draws)),
+                      nrow = n_draws)
+
+  obs_acc <- cummean(agent_to_fit$danger_response == agent_to_fit$danger_true)
+  rep_acc <- t(apply(yrep_post, 1, function(yr) {
+    cummean(yr == agent_to_fit$danger_true)
+  }))
+
+  ppc_summary <- tibble(
+    trial = seq_len(n_trials),
+    obs   = obs_acc,
+    q05   = apply(rep_acc, 2, quantile, 0.05),
+    q25   = apply(rep_acc, 2, quantile, 0.25),
+    q50   = apply(rep_acc, 2, quantile, 0.50),
+    q75   = apply(rep_acc, 2, quantile, 0.75),
+    q95   = apply(rep_acc, 2, quantile, 0.95)
+  )
+
+  ggplot(ppc_summary, aes(x = trial)) +
+    geom_ribbon(aes(ymin = q05, ymax = q95), fill = "#56B4E9", alpha = 0.20) +
+    geom_ribbon(aes(ymin = q25, ymax = q75), fill = "#56B4E9", alpha = 0.40) +
+    geom_line(aes(y = q50), color = "#0072B2", linewidth = 0.8) +
+    geom_line(aes(y = obs), color = "#D55E00", linewidth = 1) +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(
+      title    = paste("Posterior Predictive Check: Subject", names(fits_empirical_2)[1], "- Condition 2"),
+      subtitle = "Blue ribbons: 50% and 90% posterior predictive intervals\nOrange line: observed cumulative accuracy",
+      x = "Trial", y = "Cumulative Accuracy"
+    )
+}
+```
 
 
+
+```{r}
+# Combination plot
+avg_cond1 <- data.frame()
+for (i in seq_along(fits_empirical)) {
+  subj_data <- Alien_Data_1 |> filter(subject == names(fits_empirical)[i]) |> arrange(trial)
+  acc <- cummean(subj_data$danger_response == subj_data$danger_true)
+  avg_cond1 <- rbind(avg_cond1, data.frame(trial = 1:96, accuracy = acc, subject = names(fits_empirical)[i]))
+}
+avg_cond1_sum <- avg_cond1 |> group_by(trial) |> summarise(mean_acc = mean(accuracy), condition = "Condition 1")
+
+
+avg_cond2 <- data.frame()
+for (i in seq_along(fits_empirical_2)) {
+  subj_data <- Alien_Data_2 |> filter(subject == names(fits_empirical_2)[i]) |> arrange(trial)
+  acc <- cummean(subj_data$danger_response == subj_data$danger_true)
+  avg_cond2 <- rbind(avg_cond2, data.frame(trial = 1:96, accuracy = acc, subject = names(fits_empirical_2)[i]))
+}
+avg_cond2_sum <- avg_cond2 |> group_by(trial) |> summarise(mean_acc = mean(accuracy), condition = "Condition 2")
+
+
+avg_both <- rbind(avg_cond1_sum, avg_cond2_sum)
+
+ggplot(avg_both, aes(x = trial, y = mean_acc, color = condition)) +
+  geom_line(linewidth = 1.2) +
+  labs(title = "Average Learning Performance by Condition",
+       x = "Trial", y = "Average Cumulative Accuracy") +
+  scale_color_manual(values = c("Condition 1" = "#0072B2", "Condition 2" = "#D55E00")) +
+  ylim(0, 1) +
+  theme_minimal()
+
+```
 
