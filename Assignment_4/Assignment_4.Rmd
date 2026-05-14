@@ -491,13 +491,6 @@ stan_data <- list(
 ```
 
 
-
-
-
-
-
-
-
 ```{r}
 
 stan_file_gcm <- here("Assignment_4",  "GCM.stan")
@@ -653,8 +646,7 @@ ggplot(ppc_summary, aes(x = trial)) +
 features <- c("spots", "legs", "eyes", "arms", "colour_green")
 
 #agent_ids <- sort(unique(simulated_responses$agent_id)) # All agents at once
-#agent_ids <- sort(unique(simulated_responses$agent_id))[1:10] # Take 10 or how ever many agents at a time.
-agent_ids <- c(1, 6, 11) # Doing one agent per type of w pattern.
+agent_ids <- sort(unique(simulated_responses$agent_id))[1:10] # Take 10 or how ever many agents at a time.
 n_agents  <- length(agent_ids)
 
 fits <- vector("list", n_agents)

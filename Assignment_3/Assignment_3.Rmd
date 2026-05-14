@@ -1,0 +1,848 @@
+---
+title: "Assignment_3"
+author: "Sara Szabo"
+date: "2026-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Task description
+
+In assignment 3 you have to analyze real world data using Bayesian models of cognition. You can apply the models we discussed during the lectures, but you need to adjust them to reflect the specific setup.
+
+The data comes from the social conformity experiment (<https://pubmed.ncbi.nlm.nih.gov/30700729/>), where cogsci students (in dataset 1) and schizophrenia patients + controls (dataset 2) combine their own intuition of trustworthiness of given faces to social information.
+
+Your task is to
+
+implement a simulation of the task
+implement 2 different agents playing the task in R and the relative Stan inferential models (WBA, the other is of your choice, e.g. SBA, PBA, or another of your liking).
+design 3-5 scenarios(i. e. different weights - one relying on social information, one not caring, some in between) that distinguish the agent and visualize the behaviors 
+simulate data from the models to assess whether the models can be fit and the true model can be inferred via model comparison
+    has the sampling worked? divergences, etc
+    model recovery on the 3-5 scenarios
+    [predictive checks; prior posterior updates; prior sensitivity, SBC and parameter recovery are optional]
+    [multilevel is optional]
+fit the 2 models to one empirical dataset (if you choose to leave multilevel out, you are fitting a no pooling model, each participant on its own]
+    data exploration
+    divergences, etc
+    predictive checks
+    prior posterior updates
+    [prior/likelihood sensitivity and multilevel are optional]
+    model comparison
+report (v minimal description of research question, v minimal description of data, description of models, model quality checks, report of results, both of model comparison and of how the parameter values look like)
+
+```{r}
+# Packages
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future,        # Future backend
+  loo,
+  patchwork
+)
+
+# parallel setup
+n_cores <- parallel::detectCores() -2
+plan(multisession, workers = n_cores)
+
+#default ggplot theme
+theme_set(theme_classic())
+```
+
+
+```{r}
+exp_data <- read_csv("assignment3_data.csv") # CogSci students data
+```
+
+```{r}
+# Create the full factorial design
+evidence_combinations <- expand_grid(
+  rating_1  = 0:7,
+  social  = 0:7,   
+)
+
+# This gives us 9 × 4 = 36 unique evidence combinations
+cat("Unique evidence combinations:", nrow(evidence_combinations), "\n")
+```
+
+```{r}
+# Core belief-update function implementing the Beta-Binomial integration model
+# for trustworthiness ratings on a 0-7 scale
+betaBinomialTrust <- function(alpha_prior = 0.5, beta_prior = 0.5,
+                               rating_1, social,
+                               w_direct = 1, w_social = 1) {
+  
+  alpha_post    <- alpha_prior + w_direct * rating_1 + w_social * social
+  beta_post     <- beta_prior  + w_direct * (7 - rating_1) + w_social * (7 - social)
+  expected_rate <- alpha_post / (alpha_post + beta_post)
+  ci_lower      <- qbeta(0.025, alpha_post, beta_post)
+  ci_upper      <- qbeta(0.975, alpha_post, beta_post)
+  
+  list(
+    alpha_post    = alpha_post,
+    beta_post     = beta_post,
+    expected_rate = expected_rate,
+    ci_lower      = ci_lower,
+    ci_upper      = ci_upper,
+    # final rating: rescale expected_rate back to 1-8 scale
+    choice        = round(expected_rate * 7)
+  )
+}
+
+# Function to generate decisions from a simulated agent
+generate_agent_decisions_trust <- function(weight_direct, weight_social,
+                                            evidence_df, n_samples = 5) {
+  evidence_df  %>% 
+    slice(rep(seq_len(n()), each = n_samples)) %>%
+    group_by(rating_1, social) %>%
+    mutate(sample_id = seq_len(n())) %>%
+    ungroup() %>%
+    pmap_dfr(function(rating_1, social, sample_id) {
+      result <- betaBinomialTrust(
+        0.5, 0.5,
+        rating_1  = rating_1,
+        social    = social,
+        w_direct  = weight_direct,
+        w_social  = weight_social
+      )
+      # Probability matching: sample theta from Beta, then sample choice from Binomial(7, theta)
+      alpha_p <- result$alpha_post
+      beta_p  <- result$beta_post
+      p       <- rbeta(1, alpha_p, beta_p)
+      choice  <- rbinom(1, 7, p)   # draw on 0-7 scale
+      
+      tibble(
+        sample_id     = sample_id,
+        rating_1      = rating_1,
+        social        = social,
+        expected_rate = result$expected_rate,
+        choice        = choice,                  # 0-7 scale for Stan
+        choice_label  = choice + 1               # 1-8 scale for reporting
+      )
+    })
+}
+
+# Prepare Stan-friendly data list
+prepare_stan_data_trust <- function(df) {
+  list(
+    N             = nrow(df),
+    choice        = df$choice,        # 0-7 scale
+    rating_1      = df$rating_1,      # 0-7 scale
+    social        = df$social,        # 0-7 scale
+    prior_rho_alpha   = 2.0,
+    prior_rho_beta    = 2.0,
+    prior_kappa_mu    = 0.5,
+    prior_kappa_sigma = 0.5,
+    run_diagnostics   = 1
+  )
+}
+```
+
+
+```{r}
+# Simulation
+
+# Scenario: agent rates trustworthiness 5/8, group rates 7/8
+# On 0-7 scale: rating_1 = 4, social = 6
+rating_1_demo <- 4
+social_demo   <- 6
+
+alpha_demo <- 0.5 + rating_1_demo + social_demo        # = 10.5
+beta_demo  <- 0.5 + (7 - rating_1_demo) + (7 - social_demo)  # = 4.5
+n_sims     <- 10000
+
+# Each simulated agent makes n_ratings trustworthiness judgments
+n_ratings  <- 20
+expected_rate_demo <- alpha_demo / (alpha_demo + beta_demo)
+
+# Model A: Beta-Binomial (uncertainty in theta propagates)
+# Draw theta from Beta, then draw ratings based on that theta
+theta_draws <- rbeta(n_sims, alpha_demo, beta_demo)
+bb_draws    <- rbinom(n_sims, size = 7, prob = theta_draws)  # single rating draw on 0-7
+
+# Model B: Standard Binomial (fixed belief, no uncertainty in theta)
+binom_draws <- rbinom(n_sims, size = 7, prob = expected_rate_demo)
+
+# Visualization
+
+# Plot 1: uncertainty in theta
+p_theta <- tibble(theta = theta_draws) %>%
+  ggplot(aes(x = theta)) +
+  geom_density(fill = "#4575b4", alpha = 0.5, color = "transparent") +
+  geom_vline(xintercept = expected_rate_demo,
+             colour = "#d73027", linewidth = 1, linetype = "dashed") +
+  scale_x_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(
+    title    = "Step 1: Uncertainty in trustworthiness belief (θ)",
+    subtitle = sprintf("Beta(%.1f, %.1f) | Dashed line is E[θ] = %.0f%%\nrating_1 = %d, social = %d (0-7 scale)",
+                       alpha_demo, beta_demo, expected_rate_demo * 100,
+                       rating_1_demo, social_demo),
+    x = expression("Latent trustworthiness tendency (" * theta * ")"),
+    y = "Density"
+  )
+
+
+plot_data <- tibble(
+  `Beta-Binomial (Uncertain θ)` = bb_draws + 1,
+  `Standard Binomial (Fixed θ)` = binom_draws + 1
+) %>%
+  pivot_longer(cols = everything(), names_to = "Model", values_to = "Rating")
+
+p_spread <- ggplot(plot_data, aes(x = Rating, fill = Model)) +
+  geom_bar(position = "identity", alpha = 0.6, aes(y = after_stat(prop))) +
+  scale_fill_manual(values = c("Standard Binomial (Fixed θ)" = "#d73027",
+                               "Beta-Binomial (Uncertain θ)" = "#4575b4")) +
+  scale_x_continuous(breaks = 1:8) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title    = "Step 2: Trustworthiness rating distribution",
+    subtitle = "Beta-Binomial shows wider spread — uncertainty in θ propagates to ratings",
+    x        = "Trustworthiness rating (1-8)",
+    y        = "Probability",
+    fill     = NULL
+  ) +
+  theme(legend.position = "top")
+
+# Combining panels
+
+p_theta + p_spread +
+  plot_annotation(
+    title    = "How uncertainty propagates: Beta-Binomial vs Binomial",
+    subtitle = sprintf(
+      "Agent's own rating: %d | group's rating: %d (0-7 scale)\nWhen belief about trustworthiness is uncertain, ratings spread more widely.",
+      rating_1_demo, social_demo)
+  )
+```
+
+```{r}
+# All combinations of agent rating and group rating on 0-7 scale
+evidence_combinations_trust <- expand.grid(
+  rating_1 = 0:7,
+  social   = 0:7
+)
+
+# Calculate SBA predictions for all evidence combinations
+sim_data_trust <- evidence_combinations_trust %>%
+  pmap_dfr(function(rating_1, social) {
+    result <- betaBinomialTrust(0.5, 0.5,
+                                rating_1 = rating_1,
+                                social   = social)
+    tibble(
+      rating_1      = rating_1,
+      social        = social,
+      expected_rate = result$expected_rate,
+      ci_lower      = result$ci_lower,
+      ci_upper      = result$ci_upper
+    )
+  }) %>%
+  mutate(
+    social_evidence = factor(
+      social, levels = 0:7,
+      labels = c("1 - Very low",  "2 - Low",
+                 "3 - Below mid", "4 - Above mid",
+                 "5 - Moderate",  "6 - High",
+                 "7 - Very high", "8 - Maximum")
+    )
+  )
+
+semantic_colors <- c(
+  "1 - Very low"  = "#d73027",
+  "2 - Low"       = "#f46d43",
+  "3 - Below mid" = "#fdae61",
+  "4 - Above mid" = "#fee090",
+  "5 - Moderate"  = "#abd9e9",
+  "6 - High"      = "#74add1",
+  "7 - Very high" = "#4575b4",
+  "8 - Maximum"   = "#313695"
+)
+
+ggplot(sim_data_trust,
+       aes(x = rating_1 + 1, y = expected_rate,
+           colour = social_evidence, group = social_evidence)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper,
+                  fill = social_evidence), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  scale_x_continuous(breaks = 1:8) +
+  scale_colour_manual(values = semantic_colors) +
+  scale_fill_manual(values   = semantic_colors) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    title    = "Simple Bayesian Agent: trustworthiness evidence integration",
+    subtitle = "Expected trustworthiness tendency with 95% credible intervals | Weights fixed at (1, 1)",
+    x        = "Agent's own initial rating (1-8 scale)",
+    y        = "Expected trustworthiness tendency (θ)",
+    colour   = "group rating",
+    fill     = "group rating"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+N_predict <- 10
+
+overdispersion_data_trust <- expand_grid(
+  rating_1 = 0:7,
+  social   = 0:7
+) %>%
+  mutate(
+    alpha_p   = 0.5 + rating_1 + social,
+    beta_p    = 0.5 + (7 - rating_1) + (7 - social),
+    theta_hat = alpha_p / (alpha_p + beta_p),
+
+    # Expected Binomial variance for N draws (baseline)
+    var_binom = N_predict * theta_hat * (1 - theta_hat),
+
+    # Beta-Binomial variance for N draws (includes belief uncertainty)
+    var_bb    = var_binom * (1 + (N_predict - 1) / (alpha_p + beta_p + 1)),
+
+    # Absolute excess variance: Var(BetaBinomial) - Var(Binomial)
+    excess_variance = var_bb - var_binom,
+
+    social_evidence = factor(
+      social, levels = 0:7,
+      labels = c("1 - Very low",  "2 - Low",
+                 "3 - Below mid", "4 - Above mid",
+                 "5 - Moderate",  "6 - High",
+                 "7 - Very high", "8 - Maximum")
+    )
+  )
+
+ggplot(overdispersion_data_trust,
+       aes(x = rating_1 + 1, y = excess_variance,
+           colour = social_evidence, group = social_evidence)) +
+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray70") +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = semantic_colors) +
+  scale_x_continuous(breaks = 1:8) +
+
+  labs(
+    title    = "Beta-Binomial overdispersion across trustworthiness evidence combinations",
+    subtitle = paste(
+      "Excess variance = Var(BetaBinomial) − Var(Binomial) for N=10 predicted draws.",
+      "\nHighest when own rating and group rating pull in opposite directions."
+    ),
+    x        = "Agent's own initial rating (1-8 scale)",
+    y        = "Excess variance\n(driven by belief uncertainty)",
+    colour   = "group rating"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title      = element_text(face = "bold", size = 14),
+    axis.title.y    = element_text(face = "bold", margin = margin(r = 10)),
+    axis.title.x    = element_text(face = "bold", margin = margin(t = 10))
+  )
+```
+
+```{r}
+agents <- tibble(
+  agent_type    = c("Self-Focused", "Balanced", "Socially-Influenced"),
+  weight_direct = c(1.5, 1.0, 0.5),
+  weight_social = c(0.5, 1.0, 2.0)
+)
+
+# Generate simulated data for all three agent types
+simulation_results_trust <- agents %>%
+  pmap_dfr(function(agent_type, weight_direct, weight_social) {
+    generate_agent_decisions_trust(weight_direct, weight_social,
+                                   evidence_combinations_trust,
+                                   n_samples = 5) %>%
+      mutate(agent_type = agent_type)
+  }) %>%
+  mutate(
+    social_evidence = factor(
+      social, levels = 0:7,
+      labels = c("1 - Very low",  "2 - Low",
+                 "3 - Below mid", "4 - Above mid",
+                 "5 - Moderate",  "6 - High",
+                 "7 - Very high", "8 - Maximum")
+    ),
+    agent_type = factor(
+      agent_type,
+      levels = c("Self-Focused", "Balanced", "Socially-Influenced")
+    )
+  )
+
+# Summarize for plotting
+plot_summary_trust <- simulation_results_trust %>%
+  group_by(agent_type, rating_1, social_evidence) %>%
+  summarise(
+    theoretical_p = mean(expected_rate),
+    empirical_p   = mean(choice / 7),   # rescale 0-7 to 0-1 for comparability
+    .groups = "drop"
+  )
+
+# Visualize
+ggplot(plot_summary_trust,
+       aes(x = rating_1 + 1, colour = social_evidence, group = social_evidence)) +
+  geom_line(aes(y = theoretical_p), linewidth = 1.2, alpha = 0.5) +
+  geom_line(aes(y = empirical_p), linetype = "dashed", linewidth = 0.8) +
+  geom_point(aes(y = empirical_p), size = 2) +
+  geom_hline(yintercept = 0.5, linetype = "dotted", colour = "grey30") +
+  facet_wrap(~ agent_type) +
+  scale_colour_manual(values = semantic_colors) +
+  scale_x_continuous(breaks = 1:8) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    title    = "Weighted Bayesian agents: three conformity scenarios",
+    subtitle = "Solid faded = internal belief | Dashed = observed rating proportions (N=5 per condition)",
+    x        = "Agent's own initial rating (1-8 scale)",
+    y        = "Expected trustworthiness tendency (θ)",
+    colour   = "group rating"
+  ) +
+  theme(legend.position  = "bottom",
+        strip.background = element_blank(),
+        strip.text       = element_text(face = "bold", size = 11))
+```
+
+```{r}
+SimpleAgent_stan <- "
+// Simple Bayesian Agent (SBA) — Face Trustworthiness Rating.
+// No free parameters — evidence is counted at face value.
+// Jeffreys prior pseudo-counts: alpha0 = beta0 = 0.5.
+// Ratings are on a 0-7 scale (original 1-8 shifted by -1 in R).
+data {
+  int<lower=1> N;
+  array[N] int<lower=0, upper=7> choice;  // agent's final rating (0-7)
+  array[N] int<lower=0, upper=7> rating_1; // agent's own initial rating (0-7)
+  array[N] int<lower=0, upper=7> social;   // group's rating (0-7)
+  int<lower=0, upper=1> run_diagnostics;
+}
+transformed data {
+  real alpha0 = 0.5;
+  real beta0  = 0.5;
+}
+model {
+  // Vectorized likelihood — fixed weights = 1
+  vector[N] alpha_post = alpha0 + to_vector(rating_1) + to_vector(social);
+  vector[N] beta_post  = beta0
+                         + (7 - to_vector(rating_1))
+                         + (7 - to_vector(social));
+  target += beta_binomial_lpmf(choice | 7, alpha_post, beta_post);
+}
+generated quantities {
+  vector[N] log_lik;
+  array[N] int prior_pred;
+  array[N] int posterior_pred;
+
+  if (run_diagnostics) {
+    for (n in 1:N) {
+      real alpha_post = alpha0 + rating_1[n] + social[n];
+      real beta_post  = beta0  + (7 - rating_1[n]) + (7 - social[n]);
+
+      log_lik[n]        = beta_binomial_lpmf(choice[n] | 7, alpha_post, beta_post);
+      prior_pred[n]     = beta_binomial_rng(7, alpha0, beta0);
+      posterior_pred[n] = beta_binomial_rng(7, alpha_post, beta_post);
+    }
+  }
+}
+"
+write_stan_file(SimpleAgent_stan,
+                dir      = "stan/",
+                basename = "sba_trust.stan")
+```
+
+```{r}
+WeightedAgent_stan <- "
+// Weighted Bayesian Agent (reparameterised) — Face Trustworthiness Rating.
+// rho in (0,1): relative weight of direct vs social evidence.
+// kappa > 0: total evidence scaling (w_d + w_s).
+// Ratings are on a 0-7 scale (original 1-8 shifted by -1 in R).
+data {
+  int<lower=1> N;
+  array[N] int<lower=0, upper=7> choice;   // agent's final rating (0-7)
+  array[N] int<lower=0, upper=7> rating_1; // agent's own initial rating (0-7)
+  array[N] int<lower=0, upper=7> social;   // group's rating (0-7)
+
+  real prior_rho_alpha;
+  real prior_rho_beta;
+  real prior_kappa_mu;
+  real<lower=0> prior_kappa_sigma;
+  int<lower=0, upper=1> run_diagnostics;
+}
+parameters {
+  real<lower=0, upper=1> rho;   // relative weight: w_d / (w_d + w_s)
+  real<lower=0>          kappa; // total weight: w_d + w_s
+}
+transformed parameters {
+  real<lower=0> weight_direct = rho * kappa;
+  real<lower=0> weight_social = (1.0 - rho) * kappa;
+}
+model {
+  // rho: weakly centred on equal weighting
+  target += beta_lpdf(rho | prior_rho_alpha, prior_rho_beta);
+  // kappa: lognormal centered on 2 (SBA equivalent when rho = 0.5)
+  target += lognormal_lpdf(kappa | prior_kappa_mu, prior_kappa_sigma);
+
+  // Vectorized likelihood
+  vector[N] alpha_post = 0.5 + weight_direct * to_vector(rating_1)
+                             + weight_social * to_vector(social);
+  vector[N] beta_post  = 0.5 + weight_direct * (7 - to_vector(rating_1))
+                             + weight_social * (7 - to_vector(social));
+  target += beta_binomial_lpmf(choice | 7, alpha_post, beta_post);
+}
+generated quantities {
+  vector[N] log_lik;
+  array[N] int prior_pred;
+  array[N] int posterior_pred;
+  real lprior = beta_lpdf(rho | prior_rho_alpha, prior_rho_beta) +
+                lognormal_lpdf(kappa | prior_kappa_mu, prior_kappa_sigma);
+
+  // Draw from priors for prior predictive
+  real rho_prior   = beta_rng(prior_rho_alpha, prior_rho_beta);
+  real kappa_prior = lognormal_rng(prior_kappa_mu, prior_kappa_sigma);
+  real wd_prior    = rho_prior * kappa_prior;
+  real ws_prior    = (1.0 - rho_prior) * kappa_prior;
+
+  if (run_diagnostics) {
+    for (n in 1:N) {
+      // Posterior quantities
+      real alpha_post = 0.5
+        + weight_direct * rating_1[n]
+        + weight_social * social[n];
+      real beta_post  = 0.5
+        + weight_direct * (7 - rating_1[n])
+        + weight_social * (7 - social[n]);
+
+      // Prior quantities
+      real alpha_prior = 0.5
+        + wd_prior * rating_1[n]
+        + ws_prior * social[n];
+      real beta_prior  = 0.5
+        + wd_prior * (7 - rating_1[n])
+        + ws_prior * (7 - social[n]);
+
+      log_lik[n]        = beta_binomial_lpmf(choice[n] | 7, alpha_post, beta_post);
+      prior_pred[n]     = beta_binomial_rng(7, alpha_prior, beta_prior);
+      posterior_pred[n] = beta_binomial_rng(7, alpha_post,  beta_post);
+    }
+  }
+}
+"
+write_stan_file(WeightedAgent_stan,
+                dir      = "stan/",
+                basename = "wba_trust.stan")
+```
+
+
+```{r}
+sba_model <- cmdstan_model("stan/sba_trust.stan")
+wba_model <- cmdstan_model("stan/wba_trust.stan")
+
+sampler_args <- list(
+  chains = 4, 
+  parallel_chains = 4, 
+  iter_warmup = 1000, 
+  iter_sampling = 1000, 
+  refresh = 0
+)
+```
+
+```{r}
+# True values for the three WBA scenarios
+# wd and ws map to weight_direct and weight_social
+# which in turn determine rho = wd/(wd+ws) and kappa = wd+ws
+true_wba <- list(
+  Self_Focused        = list(wd = 1.5, ws = 0.5),  # rho = 0.75, kappa = 2
+  Balanced            = list(wd = 1.0, ws = 1.0),  # rho = 0.50, kappa = 2
+  Socially_Influenced = list(wd = 0.5, ws = 2.0)   # rho = 0.20, kappa = 2.5
+)
+
+# Generate simulated data for each scenario
+stan_data_wba <- map(true_wba, function(params) {
+  sim <- generate_agent_decisions_trust(
+    params$wd, params$ws,
+    evidence_combinations_trust,
+    n_samples = 5
+  )
+  prepare_stan_data_trust(sim)
+})
+```
+
+```{r}
+dir.create(here::here("simmodels"), showWarnings = FALSE)
+```
+
+
+```{r}
+fit_sba_paths <- here::here(
+  "simmodels",
+  paste0("sba_trust_", names(stan_data_wba), ".rds")
+) %>% set_names(names(stan_data_wba))
+
+regenerate_simulations <- TRUE
+
+if (regenerate_simulations || !all(file.exists(fit_sba_paths))) {
+  fit_sba <- imap(stan_data_wba, function(data, scenario) {
+    fit <- sba_model$sample(
+      data          = data,
+      chains        = 2,
+      iter_warmup   = 1000,
+      iter_sampling = 2000,
+      fixed_param   = FALSE,
+      refresh       = 500,
+      seed          = 123
+    )
+    fit$save_object(fit_sba_paths[[scenario]])
+    fit
+  })
+} else {
+  fit_sba <- map(fit_sba_paths, readRDS)
+}
+```
+
+```{r}
+fit_wba_paths <- here::here(
+  "simmodels",
+  paste0("wba_trust_", names(stan_data_wba), ".rds")
+) %>% set_names(names(stan_data_wba))
+
+if (regenerate_simulations || !all(file.exists(fit_wba_paths))) {
+  seeds <- set_names(101:103, names(stan_data_wba))
+
+  fit_wba <- imap(stan_data_wba, function(data, scenario) {
+    fit <- wba_model$sample(
+      data            = data,
+      seed            = seeds[[scenario]],
+      chains          = 4,
+      parallel_chains = 4,
+      iter_warmup     = 1000,
+      iter_sampling   = 2000,
+      refresh         = 500
+    )
+    fit$save_object(fit_wba_paths[[scenario]])
+    fit
+  })
+} else {
+  fit_wba <- map(fit_wba_paths, readRDS)
+}
+```
+
+
+```{r}
+# Generalized extraction function for posteriors
+extract_predictive_data_trust <- function(fit, stan_data, scenario_name,
+                                          target_var = "posterior_pred") {
+  obs_df <- tibble(
+    obs_id   = seq_len(stan_data$N),
+    rating_1 = stan_data$rating_1,
+    social   = stan_data$social,
+    choice   = stan_data$choice
+  )
+
+  pred_samples <- posterior::as_draws_df(fit$draws(target_var)) %>%
+    dplyr::select(-.chain, -.iteration) %>%
+    tidyr::pivot_longer(
+      cols      = dplyr::starts_with(target_var),
+      names_to  = "obs_id",
+      values_to = "pred"
+    ) %>%
+    dplyr::mutate(obs_id = readr::parse_number(obs_id))
+
+  obs_summary <- obs_df %>%
+    dplyr::group_by(rating_1, social) %>%
+    dplyr::summarise(
+      p_obs = mean(choice / 7),   # rescale 0-7 to 0-1 for comparability
+      .groups = "drop"
+    )
+
+  pred_summary <- pred_samples %>%
+    dplyr::left_join(obs_df, by = "obs_id") %>%
+    dplyr::group_by(.draw, rating_1, social) %>%
+    dplyr::summarise(p_draw = mean(pred / 7), .groups = "drop") %>%
+    dplyr::group_by(rating_1, social) %>%
+    dplyr::summarise(
+      p_pred = median(p_draw),
+      lower  = quantile(p_draw, 0.025),
+      upper  = quantile(p_draw, 0.975),
+      .groups = "drop"
+    ) %>%
+    dplyr::left_join(obs_summary, by = c("rating_1", "social")) %>%
+    dplyr::mutate(
+      social_evidence = factor(
+        social, levels = 0:7,
+        labels = c("1 - Very low",  "2 - Low",
+                   "3 - Below mid", "4 - Above mid",
+                   "5 - Moderate",  "6 - High",
+                   "7 - Very high", "8 - Maximum")
+      ),
+      Scenario = scenario_name
+    )
+
+  return(pred_summary)
+}
+
+# Standardized plotting function
+plot_predictive_check_trust <- function(plot_data, title, subtitle) {
+
+  ggplot(plot_data,
+         aes(x = rating_1 + 1, colour = social_evidence,
+             fill = social_evidence)) +
+    geom_linerange(aes(ymin = lower, ymax = upper),
+                   position = position_dodge(width = 0.6),
+                   alpha = 0.5, linewidth = 2) +
+    geom_line(aes(y = p_pred),
+              position = position_dodge(width = 0.6),
+              linewidth = 1) +
+    geom_point(aes(y = p_obs),
+               shape = 21, colour = "black", stroke = 0.8, size = 2,
+               position = position_dodge(width = 0.6)) +
+    facet_wrap(~ Scenario) +
+    scale_color_manual(values = semantic_colors) +
+    scale_fill_manual(values  = semantic_colors) +
+    scale_x_continuous(breaks = 1:8) +
+    coord_cartesian(ylim = c(0, 1)) +
+    labs(
+      title    = title,
+      subtitle = subtitle,
+      x        = "Agent's own initial rating (1-8 scale)",
+      y        = "Expected trustworthiness tendency (θ)",
+      colour   = "group rating",
+      fill     = "group rating"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          strip.text = element_text(face = "bold", size = 11))
+}
+
+# Extract SBA posterior predictive checks across all three scenarios
+sba_post_ppc <- imap_dfr(fit_sba, function(fit, scenario) {
+  extract_predictive_data_trust(
+    fit           = fit,
+    stan_data     = stan_data_wba[[scenario]],
+    scenario_name = scenario,
+    target_var    = "posterior_pred"
+  )
+})
+
+# Plot SBA across all three scenarios
+plot_predictive_check_trust(
+  sba_post_ppc,
+  title    = "Posterior predictive checks: Simple Bayesian Agent",
+  subtitle = "SBA fits the Balanced scenario but misses Self-Focused and Socially-Influenced systematically"
+)
+```
+
+```{r}
+n_sims <- 50
+
+dir.create(here::here("simmodels/temp"), showWarnings = FALSE, recursive = TRUE)
+
+if (regenerate_simulations || !file.exists(here::here("simmodels/model_recovery_trust.rds"))) {
+
+  # Generate datasets from each model type
+  sim_grid <- bind_rows(
+    tibble(sim_id = 1:n_sims, true_model = "SBA", wd = 1.0, ws = 1.0),
+    tibble(sim_id = 1:n_sims, true_model = "WBA",
+           rho   = rbeta(n_sims, 2, 2),
+           kappa = rlnorm(n_sims, log(2), 0.5)) %>%
+      mutate(wd = rho * kappa, ws = (1 - rho) * kappa)
+  )
+
+  recovery_data <- sim_grid %>%
+    mutate(
+      agent_data = pmap(list(wd, ws), function(wd, ws) {
+        generate_agent_decisions_trust(wd, ws,
+                                       evidence_combinations_trust,
+                                       n_samples = 5)
+      })
+    )
+
+  results_list <- list()
+
+  for (i in seq_len(nrow(recovery_data))) {
+    id       <- recovery_data$sim_id[[i]]
+    true_mod <- recovery_data$true_model[[i]]
+    df       <- recovery_data$agent_data[[i]]
+    true_wd  <- recovery_data$wd[[i]]
+    true_ws  <- recovery_data$ws[[i]]
+
+    stan_data <- prepare_stan_data_trust(df)
+
+    # Fit both models
+    # Fit SBA with fixed_param
+fit_s <- sba_model$sample(
+  data          = stan_data,
+  chains        = 2,
+  iter_warmup   = 0,
+  iter_sampling = 500,
+  fixed_param   = TRUE,
+  refresh       = 0,
+  show_messages = FALSE,
+  output_dir    = here::here("simmodels/temp")
+)
+
+fit_w <- wba_model$sample(
+  data          = stan_data,
+  chains        = 2,
+  iter_warmup   = 1000,
+  iter_sampling = 1000,
+  refresh       = 0,
+  show_messages = FALSE,
+  output_dir    = here::here("simmodels/temp")
+)
+
+# SBA: compute ELPD directly from log_lik (no LOO needed - no parameters)
+sba_log_lik <- fit_s$draws("log_lik", format = "matrix")
+sba_elpd    <- sum(colMeans(sba_log_lik))
+
+# WBA: use LOO normally
+loo_w    <- fit_w$loo()
+wba_elpd <- loo_w$estimates["elpd_loo", "Estimate"]
+
+# Compare via ELPD difference instead of stacking weights
+elpd_diff  <- wba_elpd - sba_elpd
+winner     <- ifelse(elpd_diff > 0, "WBA", "SBA")
+
+wba_draws <- fit_w$draws(format = "df")
+
+results_list[[i]] <- tibble(
+  sim_id     = id,
+  true_model = true_mod,
+  true_wd    = true_wd,
+  true_ws    = true_ws,
+  sba_elpd   = sba_elpd,
+  wba_elpd   = wba_elpd,
+  elpd_diff  = elpd_diff,   # positive = WBA wins
+  winner     = winner,
+  wba_wd     = mean(wba_draws$rho * wba_draws$kappa),
+  wba_ws     = mean((1 - wba_draws$rho) * wba_draws$kappa)
+)
+  }
+
+  recovery_results <- bind_rows(results_list)
+  saveRDS(recovery_results, here::here("simmodels/model_recovery_trust.rds"))
+
+} else {
+  recovery_results <- readRDS(here::here("simmodels/model_recovery_trust.rds"))
+}
+
+# ── Visualize model recovery ───────────────────────────────────────────────────
+recovery_results %>%
+  ggplot(aes(x = true_model, y = elpd_diff, fill = true_model)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_fill_manual(values = c("SBA" = "#5B8DB8", "WBA" = "#D4735A")) +
+  labs(
+    title    = "Model recovery: ELPD difference (WBA - SBA) by true generating model",
+    subtitle = "Positive = WBA preferred | Negative = SBA preferred\nCorrect recovery: SBA data → negative, WBA data → positive",
+    x        = "True generating model",
+    y        = "ELPD difference (WBA - SBA)",
+    fill     = "True model"
+  ) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", size = 11))
+```
+
+
+

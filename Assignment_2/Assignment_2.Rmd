@@ -1,0 +1,373 @@
+
+
+## Packages 
+```{r}
+pacman::p_load(
+  tidyverse,    # Data manipulation and plotting
+  here,         # Robust file paths
+  cmdstanr,     # Stan interface
+  posterior,    # Posterior analysis
+  bayesplot,    # Plotting MCMC
+  furrr,        # Parallel processing
+  future        # Future backend
+)
+
+# parallel setup
+n_cores <- parallel::detectCores() -2
+plan(multisession, workers = n_cores)
+
+#default ggplot theme
+theme_set(theme_classic())
+
+```
+
+# Simulating data
+
+```{r simulating data}
+
+set.seed(123)
+trials <-  120
+
+WSLSAgent_f=function(prevChoice, feedback){
+  if(feedback == 1){
+    choice = prevChoice
+  }
+  else if (feedback == 0) {
+    choice = 1 -prevChoice 
+  }
+return(choice) 
+}
+
+# true values for later recovery
+set.seed(123)
+trials <-  120
+true_alpha <- 0.3
+true_beta  <- 2.0
+
+# initialize all vectors
+Other    <- rep(NA, trials)
+Self     <- rep(NA, trials)
+feedback <- rep(NA, trials)
+V        <- rep(NA, trials)
+
+# initializing with everything starting at 0.5
+Other[1]    <- rbinom(1, 1, 0.5)
+V[1]        <- 0.5
+Self[1]     <- rbinom(1, 1, V[1])
+feedback[1] <- as.integer(Self[1] == Other[1])
+
+
+for (t in 2:trials) {
+  Other[t] <- WSLSAgent_f(Other[t-1], feedback[t-1]) # WSLS agent starts
+  V[t]     <- V[t-1] + true_alpha * (Other[t-1] - V[t-1]) 
+  p        <- 1 / (1 + exp(-true_beta * (V[t] - 0.5)))
+  Self[t]  <- rbinom(1, 1, p) # probability of choosing 1
+  
+  feedback[t] <- as.integer(Self[t] == Other[t])
+}
+
+
+```
+
+
+```{r prepare-data}
+data_for_stan <- list(
+  n = trials,
+  Self  = Self,
+  Other = Other
+)
+```
+
+
+
+
+# STAN model
+
+```{r}
+stan_file_RL <- here("Assignment_2",  "RL.stan")
+
+mod_RL <- cmdstan_model(
+  stan_file_RL,
+  cpp_options = list(stan_threads = FALSE),
+  stanc_options = list("O1")
+  )
+```
+
+
+
+
+
+```{r fitting-model}
+# Sample from the posterior distribution using MCMC
+fit_RL <- mod_RL$sample(
+  data = data_for_stan, # should make this
+  seed = 123, # reproducibility
+  chains = 4, # nr. of MArkov-chains
+  parallel_chains = 4, #run them in parallel
+  # threads_per_chain = 1, # within-chain parallelization, here just in case
+  iter_warmup = 1000, # get discarded
+  iter_sampling = 2000, 
+  refresh = 500, # how often should progress updates be printed
+  max_treedepth = 10, # complexity of mcmc steps
+  adapt_delta = 0.99 # target acceptance rate
+  ) 
+```
+
+
+# Model quality checks
+
+```{r}
+# summary of params
+fit_RL$summary()
+
+# divergences
+fit_RL$diagnostic_summary()
+
+mcmc_trace(fit_RL$draws(), pars = c("alpha", "beta"))
+
+draws_df <- fit_RL$draws(format = "df")
+
+```
+
+
+## Prior-posterior update checks
+
+
+```{r}
+ 
+# alpha
+ggplot(draws_df)+
+  geom_density(aes(alpha), fill = "blue", alpha = 0.3) + 
+  geom_density(aes(alpha_prior), fill = "red", alpha = 0.3) +
+  geom_vline(xintercept = true_alpha, color='red')+
+  labs(
+    title = "Prior-Posterior update for alpha",
+    subtitle = "red = prior, blue = posterior, vertical line = True alpha",
+    x = "alpha", y = "Density"
+  ) +
+  theme_classic()
+
+# beta 
+ggplot(draws_df)+
+  geom_density(aes(beta), fill = "blue", alpha = 0.3) + 
+  geom_density(aes(beta_prior), fill = "red", alpha = 0.3) +
+  geom_vline(xintercept = true_beta, color='red')+
+  scale_x_continuous(limits = c(0,10))+
+  labs(
+    title = "Prior-Posterior update for beta",
+    subtitle = "red = prior, blue = posterior, vertical line = True beta",
+    x = "beta", y = "Density"
+  ) +
+  theme_classic()
+```
+
+## Prior predictive check
+
+```{r}
+
+prior_pred_sums <- draws_df %>% 
+  select(starts_with("choice_prior_pred")) %>% 
+  rowSums()
+
+
+# prior predictive check
+ggplot() +
+  geom_histogram(aes(prior_pred_sums), color = "darkblue", fill = "blue",
+                 alpha = 0.3, bins = 90) +
+  geom_point(x = sum(Self), y = 0, color = "red", shape = 17, size = 5) +
+  xlab("Predicted right hands out of 120 trials")+
+  ylab("Count")+
+  theme_classic()
+
+```
+
+
+## Posterior predictive checks
+
+
+```{r}
+posterior_pred_sums <- draws_df %>%
+  select(starts_with("Self_rep")) %>%
+  rowSums()
+
+ggplot() +
+  geom_histogram(aes(posterior_pred_sums),
+                 color = "darkblue",
+                 fill = "blue",
+                 alpha = 0.3,
+                 bins = 90) +
+  labs(
+    title = "Posterior predictive check",
+    x = "Predicted right hands out of 120 trials", y = "Count"
+  ) +
+  theme_classic()
+
+
+
+```
+
+
+
+
+```{r}
+
+# sum across trials for each draw — gives "how many heads predicted per draw"
+prior_pred_sums <- draws_df %>% 
+  select(starts_with("choice_prior_pred")) %>% 
+  rowSums()
+
+posterior_pred_sums <- draws_df %>% 
+  select(starts_with("choice_posterior_pred")) %>% 
+  rowSums()
+
+
+# alpha
+
+ggplot(draws_df)+
+  geom_histogram(aes(prior_pred_sums),
+                 color = "lightblue", fill = "blue",
+                 alpha = 0.3, bins = 90) +
+  geom_histogram(aes(posterior_pred_sums),
+                 color = "darkblue", fill = "blue",
+                 alpha = 0.3, bins = 90)+
+  geom_point(x = sum(Self), y = 0, color = "red",
+             shape = 17, size = 5) +
+  xlab("Predicted heads out of 120 trials") +
+  ylab("Density")+
+  theme_classic()
+
+```
+
+
+# Parameter recovery
+
+
+```{r}
+recover_params <- function(true_alpha, true_beta, trials = 120, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  
+  # storage
+  V <- rep(NA, trials) # p of choosing 1
+  choice <- rep(NA, trials)
+  Other <- rep(NA, trials)
+  
+  # first trial
+  Other[1] <- rbinom(1, 1, 0.5)
+  V[1] <- 0.5
+  p1 <- plogis(true_beta * (V[1] - 0.5))
+  choice[1] <- rbinom(1, 1, p1)
+  
+  # remaining trials
+  for (t in 2:trials) {
+    Other[t] <- WSLSAgent_f(Other[t-1], choice[t-1] == Other[t-1])
+    V[t] <- V[t-1] + true_alpha * (Other[t-1] - V[t-1])
+    p <- plogis(true_beta * (V[t] - 0.5))
+    choice[t] <- rbinom(1, 1, p)
+  }
+  
+  # Stan data
+  stan_data <- list(
+    n = trials,
+    Self = choice,
+    Other = Other
+  )
+  
+  # fit model
+  fit <- mod_RL$sample(
+    data = stan_data,
+    seed = 123,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 2000,
+    refresh = 0,
+    adapt_delta = 0.99
+  )
+  
+  # extract posterior means and intervals
+  summ <- fit$summary(c("alpha", "beta"))
+  
+  tibble(
+    trials = trials,
+    true_alpha = true_alpha,
+    true_beta = true_beta,
+    est_alpha = summ$mean[summ$variable == "alpha"],
+    est_beta = summ$mean[summ$variable == "beta"],
+    lo_alpha = summ$q5[summ$variable == "alpha"],
+    hi_alpha = summ$q95[summ$variable == "alpha"],
+    lo_beta = summ$q5[summ$variable == "beta"],
+    hi_beta = summ$q95[summ$variable == "beta"]
+  )
+}
+```
+
+
+
+```{r}
+
+# Recovery with different amount of trials 
+trial_lengths <- c(50, 100, 200, 400, 800)
+
+recovery_grid <- expand_grid(
+  trials = trial_lengths,
+  true_alpha = c(0.1, 0.3, 0.5, 0.7, 0.9),
+  true_beta = c(0.5, 1, 2, 4)
+)
+
+recovery_results <- pmap_dfr(
+  recovery_grid,
+  ~ recover_params(..2, ..3, trials = ..1)
+)
+
+```
+
+
+```{r}
+recovery_results %>%
+  group_by(trials) %>%
+  summarise(
+    rmse_alpha = sqrt(mean((est_alpha - true_alpha)^2)),
+    rmse_beta  = sqrt(mean((est_beta - true_beta)^2))
+  ) %>%
+  pivot_longer(cols = starts_with("rmse")) %>%
+  ggplot(aes(x = trials, y = value, color = name)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  ylab("RMSE") + xlab("Number of trials") +
+  theme_classic()
+```
+
+
+
+```{r}
+
+ggplot(recovery_results, aes(true_alpha, est_alpha)) +
+  geom_pointrange(aes(ymin = lo_alpha, ymax = hi_alpha), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, 
+              linetype = "dashed", color = "red") +
+  facet_wrap(~ trials, nrow = 2) +
+  labs(
+    title = "Parameter recovery: α (learning rate)",
+    subtitle = "Each panel shows a different number of trials\nPoints = posterior mean, bars = 90% CI, dashed = perfect recovery",
+    x = "True α",
+    y = "Estimated α"
+  ) +
+  theme_classic()
+
+ggplot(recovery_results, aes(true_beta, est_beta)) +
+  geom_pointrange(aes(ymin = lo_beta, ymax = hi_beta), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, 
+              linetype = "dashed", color = "red") +
+  facet_wrap(~ trials, nrow = 2) +
+  labs(
+    title = "Parameter recovery: β (inverse temperature)",
+    subtitle = "Each panel shows a different number of trials\nPoints = posterior mean, bars = 90% CI, dashed = perfect recovery",
+    x = "True β",
+    y = "Estimated β"
+  ) +
+  theme_classic()
+
+```
+
+
+
