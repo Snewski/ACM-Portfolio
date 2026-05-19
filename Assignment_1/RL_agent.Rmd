@@ -194,7 +194,7 @@ df_rand_RL_noise_LR
 plot_rand_RL_noise_LR = ggplot(df_rand_RL_noise_LR, aes(x = trial)) +  
   geom_line(aes(y = cumulative_rate, group = learning_rates, color = learning_rates)) +
   geom_line(aes(y = decay_memory, group=learning_rates), color = "green")+
-  geom_hline( yintercept = biased_agent_rate, linetype ="dashed") + ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic() + 
+  geom_hline( yintercept = biased_agent_rate, linetype ="dashed") + ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic() + theme(legend.position = "none") +
     labs(
     title = "Cumulative Rate Across Incremented Learning Rate",
     subtitle = "RL (Power Law Decay) vs Biased (70%) + Noise (5%)",
@@ -514,7 +514,7 @@ df_WSLS_RL_LR = df_WSLS_RL_LR %>% group_by(learning_rates) %>% mutate(cumulative
 ```{r}
 plot_WSLS_RL_LR = ggplot(df_WSLS_RL_LR, aes(trial)) + 
     geom_line(aes(y = cumulative_rate, group=learning_rates, color =learning_rates))+ 
-    ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic() + 
+    ylim(0,1) + facet_wrap(.~learning_rates) + theme_classic() + theme(legend.position = "none") +
     labs(
     title = "Cumulative Rate Across Incremented Learning Rate",
     subtitle = "RL (Learning_Rate = 30%) vs WSLS",
