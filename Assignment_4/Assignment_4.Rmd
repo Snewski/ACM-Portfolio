@@ -16,7 +16,8 @@ pacman::p_load(
   future,        # Future backend
   loo,
   patchwork,
-  knitr
+  knitr,
+  future.apply
 )
 
 # parallel setup
@@ -675,11 +676,11 @@ for (i in seq_along(agent_ids)) {
     y = as.integer(df_s$sim_response),
     obs = as.matrix(df_s[, features]),
     cat_feedback = as.integer(df_s$danger_true),
-    prior_w_alpha     = rep(1, length(features)),
-    prior_log_c_mu    = log(2),
-    prior_log_c_sigma = 1,
-    prior_bias_alpha  = 1,
-    prior_bias_beta   = 1,
+    prior_w_alpha     = rep(3, length(features)),
+    prior_log_c_mu    = log(1.5),
+    prior_log_c_sigma = 0.5,
+    prior_bias_alpha  = 3,
+    prior_bias_beta   = 3,
     run_diagnostics   = 1
   )
   
@@ -688,22 +689,87 @@ for (i in seq_along(agent_ids)) {
     data = stan_data,
     chains = 4,
     parallel_chains = 4,
-    iter_warmup = 1000,
-    iter_sampling = 2000,
+    iter_warmup = 500,
+    iter_sampling = 1000,
     seed = 123,
     refresh = 500, # how often should progress updates be printed
-    max_treedepth = 10, # complexity of mcmc steps
-    adapt_delta = 0.99 # target acceptance rate
+    max_treedepth = 8, # complexity of mcmc steps
+    adapt_delta = 0.85 # target acceptance rate
   )
   
   fits[[i]] <- fit
    # Save after each agent (overwrites previous save)
-  saveRDS(fits, file = "all_agent_fits_sim.rds")
+  saveRDS(fits, file = "all_agent_fits_sim_NEW.rds")
   
   cat("✓ Finished agent", aid, "\n")
 }
-cat("\n File saved as 'all_agent_fits_sim.rds'\n")
+cat("\n File saved as 'all_agent_fits_sim_NEW.rds'\n")
 ```
+
+```{r}
+#if ur pc can handle it
+library(future.apply)
+plan(multisession, workers = 2)
+
+# Create empty list to store results
+fits <- vector("list", length(agent_ids))
+names(fits) <- agent_ids
+
+# File to save progress
+progress_file <- "all_agent_fits_progress.rds"
+
+# Run with saving inside the loop
+for (i in seq_along(agent_ids)) {
+  aid <- agent_ids[i]
+  
+  cat("\n==============================\n")
+  cat("Fitting agent", aid, "(", i, "of", n_agents, ")\n")
+  cat("==============================\n")
+  
+  df_s <- simulated_responses |>
+    filter(agent_id == aid) |>
+    arrange(trial_within_subject)
+  
+  stan_data <- list(
+    N_total = nrow(df_s),
+    N_features = length(features),
+    y = as.integer(df_s$sim_response),
+    obs = as.matrix(df_s[, features]),
+    cat_feedback = as.integer(df_s$danger_true),
+    prior_w_alpha = rep(4, length(features)),
+    prior_log_c_mu = log(1.5),
+    prior_log_c_sigma = 0.5,
+    prior_bias_alpha = 4,
+    prior_bias_beta = 4,
+    run_diagnostics = 1
+  )
+  
+  fit <- mod$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 500,
+    iter_sampling = 1000,
+    seed = 123 + i,
+    refresh = 50,  # Show progress within each agent
+    max_treedepth = 8,
+    adapt_delta = 0.85
+  )
+  
+  # Store in list
+  fits[[i]] <- fit
+  
+  # SAVE AFTER EACH AGENT (overwrites)
+  saveRDS(fits, file = progress_file)
+  
+  cat("✓ Finished agent", aid, "- saved to", progress_file, "\n")
+}
+
+cat("\n✅ ALL DONE! Final save...\n")
+saveRDS(fits, file = "all_agent_fits_COMPLETE.rds")
+cat("Complete file saved as 'all_agent_fits_COMPLETE.rds'\n")
+```
+
 ```{r}
 saveRDS(fits, file = "all_agent_fits_sim.rds")
 ```
@@ -1030,7 +1096,8 @@ getwd()
 ```
 
 ```{r}
-fits_agents = readRDS("all_agent_fits_sim.rds")
+fits_agents = readRDS("all_agent_fits_progress.rds")
+#fits_agents = readRDS("all_agent_fits_sim.rds")
 fits_empirical = readRDS("fits_condition1_all_subjects.rds")
 fits_empirical_2 = readRDS("fits_condition2_all_subjects.rds")
 
@@ -1039,9 +1106,7 @@ fits_empirical_2 = readRDS("fits_condition2_all_subjects.rds")
 ```{r}
 length(fits_agents)
 ```
-```{r}
-View(simulated_responses)
-```
+
 ```{r}
 w1_true = simulated_responses$w1_true
 w2_true = simulated_responses$w2_true
@@ -1063,13 +1128,365 @@ ggplot(df, aes(x = subject, y = mean)) +
   labs(title = "Simulated posterior estimates for w[1] across all agents", subtitle = "Points = posterior mean, bars = 90% CI, red_line = w[1]_true", x = "Subjects", y = "w[1] - Spots") 
 
 ```
+
+
+
 ```{r}
-w1_true = simulated_responses$w1_true
-w2_true = simulated_responses$w2_true
-w3_true = simulated_responses$w3_true
-w4_true = simulated_responses$w4_true
-w5_true = simulated_responses$w5_true
+# Profile 1: subjects 1-30
+profile1_fits <- fits_agents[1:30]
+
+# Profile 2: subjects 31-60  
+profile2_fits <- fits_agents[31:60]
+
+# Profile 3: subjects 61-90
+profile3_fits <- fits_agents[61:90]
 ```
+```{r}
+# Profile 1 (subjects 1-30)
+true_profile1 <- data.frame(
+  w1 = 0.2,
+  w2 = 0.2,
+  w3 = 0.2,
+  w4 = 0.2,
+  w5 = 0.2
+)
+
+# Profile 2 (subjects 31-60)
+true_profile2 <- data.frame(
+  w1 = 0.3,
+  w2 = 0.1,
+  w3 = 0.3,
+  w4 = 0.15,
+  w5 = 0.15
+)
+
+# Profile 3 (subjects 61-90)
+true_profile3 <- data.frame(
+  w1 = 0.1,
+  w2 = 0.1,
+  w3 = 0.6,
+  w4 = 0.1,
+  w5 = 0.1
+)
+```
+
+
+```{r}
+
+true_w1_1 <- true_profile1$w1
+true_w1_2 <- true_profile2$w1
+true_w1_3 <- true_profile3$w1
+
+w1_data <- rbind(
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile1_fits, function(fit) mean(fit$draws("w[1]"))),
+    q5 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[1]"), 0.05)),
+    q95 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[1]"), 0.95)),
+    profile = "Profile 1",
+    true_value = true_w1_1
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile2_fits, function(fit) mean(fit$draws("w[1]"))),
+    q5 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[1]"), 0.05)),
+    q95 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[1]"), 0.95)),
+    profile = "Profile 2",
+    true_value = true_w1_2
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile3_fits, function(fit) mean(fit$draws("w[1]"))),
+    q5 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[1]"), 0.05)),
+    q95 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[1]"), 0.95)),
+    profile = "Profile 3",
+    true_value = true_w1_3
+  )
+)
+
+ggplot(w1_data, aes(x = subject)) +
+  geom_pointrange(aes(y = mean, ymin = q5, ymax = q95), alpha = 0.6, size = 0.5) +
+  geom_hline(aes(yintercept = true_value), color = "red", linetype = "dashed") +
+  facet_wrap(~ profile, ncol = 3) +
+  scale_y_continuous(limits = c(0, 0.5)) +
+  labs(title = "w[1] - Spots: Posterior estimates across profiles",subtitle = "Red Line: Weight True Value",
+       x = "Agents", y = "Weight Value") +
+  theme_minimal() 
+```
+
+
+
+
+```{r}
+true_w2_1 <- true_profile1$w2
+true_w2_2 <- true_profile2$w2
+true_w2_3 <- true_profile3$w2
+
+w2_data <- rbind(
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile1_fits, function(fit) mean(fit$draws("w[2]"))),
+    q5 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[2]"), 0.05)),
+    q95 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[2]"), 0.95)),
+    profile = "Profile 1",
+    true_value = true_w2_1
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile2_fits, function(fit) mean(fit$draws("w[2]"))),
+    q5 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[2]"), 0.05)),
+    q95 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[2]"), 0.95)),
+    profile = "Profile 2",
+    true_value = true_w2_2
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile3_fits, function(fit) mean(fit$draws("w[2]"))),
+    q5 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[2]"), 0.05)),
+    q95 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[2]"), 0.95)),
+    profile = "Profile 3",
+    true_value = true_w2_3
+  )
+)
+
+ggplot(w2_data, aes(x = subject)) +
+  geom_pointrange(aes(y = mean, ymin = q5, ymax = q95), alpha = 0.6, size = 0.5) +
+  geom_hline(aes(yintercept = true_value), color = "red", linetype = "dashed") +
+  facet_wrap(~ profile, ncol = 3) +
+  scale_y_continuous(limits = c(0, 0.5)) +
+  labs(title = "w[2] - Legs: Posterior estimates across profiles",subtitle = "Red Line: Weight True Value",
+       x = "Agents", y = "Weight Value") +
+  theme_minimal() 
+```
+```{r}
+true_w3_1 <- true_profile1$w3
+true_w3_2 <- true_profile2$w3
+true_w3_3 <- true_profile3$w3
+
+w3_data <- rbind(
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile1_fits, function(fit) mean(fit$draws("w[3]"))),
+    q5 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[3]"), 0.05)),
+    q95 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[3]"), 0.95)),
+    profile = "Profile 1",
+    true_value = true_w3_1
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile2_fits, function(fit) mean(fit$draws("w[2]"))),
+    q5 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[2]"), 0.05)),
+    q95 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[2]"), 0.95)),
+    profile = "Profile 2",
+    true_value = true_w3_2
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile3_fits, function(fit) mean(fit$draws("w[3]"))),
+    q5 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[3]"), 0.05)),
+    q95 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[3]"), 0.95)),
+    profile = "Profile 3",
+    true_value = true_w3_3
+  )
+)
+
+ggplot(w3_data, aes(x = subject)) +
+  geom_pointrange(aes(y = mean, ymin = q5, ymax = q95), alpha = 0.6, size = 0.5) +
+  geom_hline(aes(yintercept = true_value), color = "red", linetype = "dashed") +
+  facet_wrap(~ profile, ncol = 3) +
+  scale_y_continuous(limits = c(0, 0.7)) +
+  labs(title = "w[3] - Eyes: Posterior estimates across profiles",subtitle = "Red Line: Weight True Value",
+       x = "Agents", y = "Weight Value") +
+  theme_minimal() 
+```
+
+```{r}
+true_w4_1 <- true_profile1$w4
+true_w4_2 <- true_profile2$w4
+true_w4_3 <- true_profile3$w4
+
+w4_data <- rbind(
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile1_fits, function(fit) mean(fit$draws("w[4]"))),
+    q5 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[4]"), 0.05)),
+    q95 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[4]"), 0.95)),
+    profile = "Profile 1",
+    true_value = true_w4_1
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile2_fits, function(fit) mean(fit$draws("w[4]"))),
+    q5 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[4]"), 0.05)),
+    q95 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[4]"), 0.95)),
+    profile = "Profile 2",
+    true_value = true_w4_2
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile3_fits, function(fit) mean(fit$draws("w[4]"))),
+    q5 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[4]"), 0.05)),
+    q95 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[4]"), 0.95)),
+    profile = "Profile 3",
+    true_value = true_w4_3
+  )
+)
+
+ggplot(w4_data, aes(x = subject)) +
+  geom_pointrange(aes(y = mean, ymin = q5, ymax = q95), alpha = 0.6, size = 0.5) +
+  geom_hline(aes(yintercept = true_value), color = "red", linetype = "dashed") +
+  facet_wrap(~ profile, ncol = 3) +
+  scale_y_continuous(limits = c(0, 0.5)) +
+  labs(title = "w[4] - Arms: Posterior estimates across profiles",subtitle = "Red Line: Weight True Value",
+       x = "Agents", y = "Weight Value") +
+  theme_minimal() 
+
+```
+
+
+```{r}
+true_w5_1 <- true_profile1$w5
+true_w5_2 <- true_profile2$w5
+true_w5_3 <- true_profile3$w5
+
+w5_data <- rbind(
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile1_fits, function(fit) mean(fit$draws("w[5]"))),
+    q5 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[5]"), 0.05)),
+    q95 = sapply(profile1_fits, function(fit) quantile(fit$draws("w[5]"), 0.95)),
+    profile = "Profile 1",
+    true_value = true_w5_1
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile2_fits, function(fit) mean(fit$draws("w[5]"))),
+    q5 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[5]"), 0.05)),
+    q95 = sapply(profile2_fits, function(fit) quantile(fit$draws("w[5]"), 0.95)),
+    profile = "Profile 2",
+    true_value = true_w5_2
+  ),
+  data.frame(
+    subject = 1:30,
+    mean = sapply(profile3_fits, function(fit) mean(fit$draws("w[5]"))),
+    q5 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[5]"), 0.05)),
+    q95 = sapply(profile3_fits, function(fit) quantile(fit$draws("w[5]"), 0.95)),
+    profile = "Profile 3",
+    true_value = true_w5_3
+  )
+)
+
+ggplot(w5_data, aes(x = subject)) +
+  geom_pointrange(aes(y = mean, ymin = q5, ymax = q95), alpha = 0.6, size = 0.5) +
+  geom_hline(aes(yintercept = true_value), color = "red", linetype = "dashed") +
+  facet_wrap(~ profile, ncol = 3) +
+  scale_y_continuous(limits = c(0, 0.5)) +
+  labs(title = "w[5] - Colour_green: Posterior estimates across profiles",subtitle = "Red Line: Weight True Value",
+       x = "Agents", y = "Weight Value") +
+  theme_minimal() 
+```
+```{r}
+
+# Get c_true for each sensitivity group (first agent of each group)
+c_true_values <- data.frame(
+  sensitivity = 1:6,
+  c_true = c(
+    simulated_responses$c_true[simulated_responses$agent_id == 1][1],
+    simulated_responses$c_true[simulated_responses$agent_id == 6][1],
+    simulated_responses$c_true[simulated_responses$agent_id == 11][1],
+    simulated_responses$c_true[simulated_responses$agent_id == 16][1],
+    simulated_responses$c_true[simulated_responses$agent_id == 21][1],
+    simulated_responses$c_true[simulated_responses$agent_id == 26][1]
+  )
+)
+
+print(c_true_values)
+
+```
+```{r}
+# sensitivity fits 
+sens1_fits <- c(fits_agents[1:5], fits_agents[31:35], fits_agents[61:65])
+sens2_fits <- c(fits_agents[6:10], fits_agents[36:40], fits_agents[66:70])
+sens3_fits <- c(fits_agents[11:15], fits_agents[41:45], fits_agents[71:75])
+sens4_fits <- c(fits_agents[16:20], fits_agents[46:50], fits_agents[76:80])
+sens5_fits <- c(fits_agents[21:25], fits_agents[51:55], fits_agents[81:85])
+sens6_fits <- c(fits_agents[26:30], fits_agents[56:60], fits_agents[86:90])
+# all the true fits
+c_true_1 <- 0.5
+c_true_2 <- 1.0
+c_true_3 <- 2.0
+c_true_4 <- 4.0
+c_true_5 <- 5.0
+c_true_6 <- 15.0
+
+c_data <- rbind(
+  data.frame(
+    subject = 1:15,
+    profile = rep(c("Profile 1", "Profile 2", "Profile 3"), each = 5),
+    mean = sapply(sens1_fits, function(fit) mean(fit$draws("c"))),
+    q5 = sapply(sens1_fits, function(fit) quantile(fit$draws("c"), 0.05)),
+    q95 = sapply(sens1_fits, function(fit) quantile(fit$draws("c"), 0.95)),
+    sensitivity = "Sensitivity 1",
+    true_value = c_true_1
+  ),
+  data.frame(
+    subject = 1:15,
+    profile = rep(c("Profile 1", "Profile 2", "Profile 3"), each = 5),
+    mean = sapply(sens2_fits, function(fit) mean(fit$draws("c"))),
+    q5 = sapply(sens2_fits, function(fit) quantile(fit$draws("c"), 0.05)),
+    q95 = sapply(sens2_fits, function(fit) quantile(fit$draws("c"), 0.95)),
+    sensitivity = "Sensitivity 2",
+    true_value = c_true_2
+  ),
+  data.frame(
+    subject = 1:15,
+    profile = rep(c("Profile 1", "Profile 2", "Profile 3"), each = 5),
+    mean = sapply(sens3_fits, function(fit) mean(fit$draws("c"))),
+    q5 = sapply(sens3_fits, function(fit) quantile(fit$draws("c"), 0.05)),
+    q95 = sapply(sens3_fits, function(fit) quantile(fit$draws("c"), 0.95)),
+    sensitivity = "Sensitivity 3",
+    true_value = c_true_3
+  ),
+  data.frame(
+    subject = 1:15,
+    profile = rep(c("Profile 1", "Profile 2", "Profile 3"), each = 5),
+    mean = sapply(sens4_fits, function(fit) mean(fit$draws("c"))),
+    q5 = sapply(sens4_fits, function(fit) quantile(fit$draws("c"), 0.05)),
+    q95 = sapply(sens4_fits, function(fit) quantile(fit$draws("c"), 0.95)),
+    sensitivity = "Sensitivity 4",
+    true_value = c_true_4
+  ),
+  data.frame(
+    subject = 1:15,
+    profile = rep(c("Profile 1", "Profile 2", "Profile 3"), each = 5),
+    mean = sapply(sens5_fits, function(fit) mean(fit$draws("c"))),
+    q5 = sapply(sens5_fits, function(fit) quantile(fit$draws("c"), 0.05)),
+    q95 = sapply(sens5_fits, function(fit) quantile(fit$draws("c"), 0.95)),
+    sensitivity = "Sensitivity 5",
+    true_value = c_true_5
+  ),
+  data.frame(
+    subject = 1:15,
+    profile = rep(c("Profile 1", "Profile 2", "Profile 3"), each = 5),
+    mean = sapply(sens6_fits, function(fit) mean(fit$draws("c"))),
+    q5 = sapply(sens6_fits, function(fit) quantile(fit$draws("c"), 0.05)),
+    q95 = sapply(sens6_fits, function(fit) quantile(fit$draws("c"), 0.95)),
+    sensitivity = "Sensitivity 6",
+    true_value = c_true_6
+  )
+)
+
+ggplot(c_data, aes(x = subject, color = profile)) +
+  geom_pointrange(aes(y = mean, ymin = q5, ymax = q95), 
+                  position = position_dodge(0.3), size = 0.5) +
+  geom_hline(aes(yintercept = true_value), color = "red", linetype = "dashed") +
+  facet_wrap(~ sensitivity, ncol = 3, scales = "free_y") +
+  labs(title = "c - Sensitivity: Posterior estimates across sensitivity values",
+       subtitle = "Red Line: True c Value",
+       x = "Agents", y = "c Value", color = "Weighting Profile") +
+  theme_minimal() 
+```
+
 
 ```{r}
 # Alternative method - add true values directly to df_all
@@ -1108,13 +1525,6 @@ ggplot(df_all, aes(x = subject)) +
        y = "Weight Value") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
-
-```{r}
-
-```
-
-
-
 ```{r}
 
 
